@@ -12,8 +12,28 @@ try {
 const state = {
   kb: false,
   mouseMove: false,
-  mouseClick: false
+  mouseClick: false,
+  lastInputTs: 0
 };
+
+const KEY_LATCH_MS = 120;
+let keyPhysicalDown = false;
+let keyLatchTimer;
+
+function markInputActivity() {
+  state.lastInputTs = Date.now();
+}
+
+function updateKeyboardSignal() {
+  if (keyPhysicalDown) {
+    state.kb = true;
+    return;
+  }
+  clearTimeout(keyLatchTimer);
+  keyLatchTimer = setTimeout(() => {
+    if (!keyPhysicalDown) state.kb = false;
+  }, KEY_LATCH_MS);
+}
 
 // Check accessibility permissions first
 
@@ -27,12 +47,16 @@ if (!permissions.hasPermissions) {
 // Keyboard events
 iohook.on('keyDown', (event) => {
    // console.log('Key pressed:', event.keyCode)
+     keyPhysicalDown = true;
      state.kb = true;
+     markInputActivity();
 })
 
 iohook.on('keyUp', (event) => {
    // console.log('Key released:', event.keyCode)
-     state.kb = false;
+     keyPhysicalDown = false;
+     markInputActivity();
+     updateKeyboardSignal();
 })
 
 let mouseMoveTimeout;
@@ -41,6 +65,7 @@ const MOUSE_STOP_DELAY = 150; // ms
 iohook.on('mouseMoved', (event) => {
    // console.log('Mouse moved to:', event.x, event.y)
    state.mouseMove = true;
+   markInputActivity();
    clearTimeout(mouseMoveTimeout);
    mouseMoveTimeout = setTimeout(() => {
        state.mouseMove = false;
@@ -50,11 +75,13 @@ iohook.on('mouseMoved', (event) => {
 iohook.on('leftMouseDown', (event) => {
     //console.log('Left click at:', event.x, event.y)
     state.mouseClick = true;
+    markInputActivity();
 })
 
 iohook.on('leftMouseUp', (event) => {
     //console.log('Left click released at:', event.x, event.y)
     state.mouseClick = false;
+    markInputActivity();
 })
 
 // Note: iohook-macos does not support scroll events reliably

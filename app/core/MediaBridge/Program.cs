@@ -6,6 +6,8 @@ using Windows.Media.Control;
 
 class Program
 {
+    static GlobalSystemMediaTransportControlsSession? _subscribedSession;
+
     static async Task Main()
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -31,15 +33,30 @@ class Program
 
     static void SubscribeToSession(GlobalSystemMediaTransportControlsSession session)
     {
-        session.MediaPropertiesChanged += async (s, e) =>
+        if (ReferenceEquals(_subscribedSession, session))
         {
-            await EmitSession(s);
-        };
+            return;
+        }
 
-        session.PlaybackInfoChanged += async (s, e) =>
+        if (_subscribedSession != null)
         {
-            await EmitSession(s);
-        };
+            _subscribedSession.MediaPropertiesChanged -= OnMediaPropertiesChanged;
+            _subscribedSession.PlaybackInfoChanged -= OnPlaybackInfoChanged;
+        }
+
+        _subscribedSession = session;
+        session.MediaPropertiesChanged += OnMediaPropertiesChanged;
+        session.PlaybackInfoChanged += OnPlaybackInfoChanged;
+    }
+
+    static async void OnMediaPropertiesChanged(GlobalSystemMediaTransportControlsSession sender, MediaPropertiesChangedEventArgs args)
+    {
+        await EmitSession(sender);
+    }
+
+    static async void OnPlaybackInfoChanged(GlobalSystemMediaTransportControlsSession sender, PlaybackInfoChangedEventArgs args)
+    {
+        await EmitSession(sender);
     }
 
     static async Task EmitCurrentSession(GlobalSystemMediaTransportControlsSessionManager manager)
@@ -48,6 +65,12 @@ class Program
 
         if (session == null)
         {
+            if (_subscribedSession != null)
+            {
+                _subscribedSession.MediaPropertiesChanged -= OnMediaPropertiesChanged;
+                _subscribedSession.PlaybackInfoChanged -= OnPlaybackInfoChanged;
+                _subscribedSession = null;
+            }
             EmitEmpty();
             return;
         }

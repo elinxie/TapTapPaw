@@ -41,6 +41,8 @@ async function listPorts() {
 
 function connectTo(path, onConnect, onError, options) {
   currentOptions = options || {};
+  // Always reset loop/timers before (re)connecting so startup behavior is consistent.
+  stopStateUpdateLoop();
   if (port && port.isOpen) {
     port.close((err) => {
       if (err) console.log("Error closing port:", err.message);
@@ -73,6 +75,16 @@ function performOpen(path, onConnect, onError) {
     path: path,
     baudRate: BAUD_RATE,
     autoOpen: false,
+  });
+
+  port.on("close", () => {
+    console.log("Serial port closed.");
+    stopStateUpdateLoop();
+  });
+
+  port.on("error", (err) => {
+    console.log("Serial port error:", err.message);
+    stopStateUpdateLoop();
   });
 
   port.open((err) => {
@@ -141,6 +153,8 @@ function stopStateUpdateLoop() {
   stateUpdateTimers.forEach((timerId) => clearInterval(timerId));
   stateUpdateTimers = [];
   queryLoopRunning = false;
+  // Reset cached media so reconnect/start can resend metadata immediately.
+  cachedSysData.media = { state: 0, track: "", artist: "" };
 }
 
 // ---------------------------------------------------------
@@ -156,6 +170,16 @@ function stopStateUpdateLoop() {
 const os = require("os");
 
 async function getSystemStats() {
+  if (platform === "win32") {
+    const battData = si ? await si.battery().catch(() => ({ percent: 0, isCharging: false })) : { percent: 0, isCharging: false };
+    return {
+      cpu: Math.min(Math.max(Math.round(state.cpu || 0), 0), 100),
+      ram_used: Math.min(Math.max(Math.round(state.ram || 0), 0), 100),
+      batt: battData?.percent ?? 0,
+      charging: !!battData?.isCharging,
+    };
+  }
+
   // If the systeminformation module didn't load, use a simple os-based fallback
   if (!si) {
     const cpuUsage = os.loadavg()[0] * 100 || 0; // loadavg only meaningful on *nix
@@ -237,17 +261,26 @@ if (process.resourcesPath && fs.existsSync(path.join(process.resourcesPath, "Med
     windowsHide: true
   });
   console.log("MediaBridge started");
+  let bridgeStdoutBuffer = "";
   bridgeProcess.stdout.on("data", (data) => {
-    try {
-      const json = JSON.parse(data.toString());
-      latestWindowsMedia = {
-        state: json.state || 0,
-        track: json.track || "",
-        artist: json.artist || "",
-        app: json.app || ""
-      };
-    } catch (e) {
-      console.error("Invalid JSON from MediaBridge:", data.toString());
+    bridgeStdoutBuffer += data.toString("utf8");
+    const lines = bridgeStdoutBuffer.split(/\r?\n/);
+    bridgeStdoutBuffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const json = JSON.parse(trimmed);
+        latestWindowsMedia = {
+          state: json.state || 0,
+          track: json.track || "",
+          artist: json.artist || "",
+          app: json.app || ""
+        };
+      } catch (e) {
+        console.error("Invalid JSON from MediaBridge line:", trimmed);
+      }
     }
   });
 
@@ -350,16 +383,18 @@ function startStateUpdateLoop() {
     startWindowsBridge();
   }
   queryLoopRunning = true;
+  // Force a fresh media diff on each new loop start.
+  cachedSysData.media = { state: 0, track: "", artist: "" };
   const start_header = 0xff;
   const status_header = 0x01; // 0x01 indicates this packet contains system status
   const data_length = 9; // Number of bytes in the data packet (excluding start byte and length byte)
   const WEATHER_UPDATE_INTERVAL = 15*60*1000; // 15 minutes
   const STAT_UPDATE_INTERVAL = 1000; // ms
-  const SERIAL_SEND_INTERVAL = 100; // ms
-  let lastStatUpdateTime = 0;
+  const ACTIVE_SERIAL_SEND_INTERVAL = 100; // ms
+  const IDLE_SERIAL_SEND_INTERVAL = 500; // ms
 
-  // 1. keyboard & mouse monitoring 100 ms interval
-  const serialSendTimer = setInterval(async () => {
+  // 1. keyboard & mouse monitoring (adaptive interval)
+  const sendStatusPacket = () => {
     try {
       // one byte per input (bit positions):
       // bit0 = key down (1)
@@ -385,7 +420,7 @@ function startStateUpdateLoop() {
       const sec = date.getSeconds();
       const mediaState = cachedSysData.media.state || 0;
 
-      //buffer to send to ESP32 (10 bytes total)
+      // buffer to send to ESP32
       const buf = Buffer.from([
         start_header,
         status_header,
@@ -405,12 +440,34 @@ function startStateUpdateLoop() {
         port.write(buf, (err) => {
           if (err) console.log("Event write error:", err.message);
         });
+      // console.log(`[serial] status write @${currentSerialInterval}ms evt=${evt} cpu=${cpu}% mem=${memUsed}% batt=${battery}% charging=${charging} time=${hour}:${min}:${sec} media=${mediaState}`);
       }
     } catch (error) {
       console.error("Error in state update loop:", error.message);
     }
-  }, SERIAL_SEND_INTERVAL);
-  stateUpdateTimers.push(serialSendTimer);
+  };
+
+  let currentSerialInterval = ACTIVE_SERIAL_SEND_INTERVAL;
+  let serialSendTimer = setInterval(sendStatusPacket, currentSerialInterval);
+  const serialSendTimerIndex = stateUpdateTimers.push(serialSendTimer) - 1;
+  sendStatusPacket();
+  sendBootstrapPackets();
+
+  const serialRateAdjustTimer = setInterval(() => {
+    const inputActive = !!(state.kb || state.mouseMove || state.mouseClick);
+    const targetInterval = inputActive
+      ? ACTIVE_SERIAL_SEND_INTERVAL
+      : IDLE_SERIAL_SEND_INTERVAL;
+
+    if (targetInterval !== currentSerialInterval) {
+      clearInterval(serialSendTimer);
+      serialSendTimer = setInterval(sendStatusPacket, targetInterval);
+      currentSerialInterval = targetInterval;
+      stateUpdateTimers[serialSendTimerIndex] = serialSendTimer;
+     // console.log(`[serial] send interval switched to ${currentSerialInterval}ms`);
+    }
+  }, 100);
+  stateUpdateTimers.push(serialRateAdjustTimer);
 
   // 2. SYSTEM STATUS and MEDIA INFOMATION every 1 sec
   const statUpdateTimer = setInterval(async () => {
@@ -419,7 +476,10 @@ function startStateUpdateLoop() {
       const mediaInfo = await getMediaInfo();
 
       // 2. Log track changes for user feedback
-      if (mediaInfo.track && mediaInfo.track !== cachedSysData.media.track) {
+      const trackChanged = mediaInfo.track !== cachedSysData.media.track;
+      const artistChanged = mediaInfo.artist !== cachedSysData.media.artist;
+      const stateChanged = mediaInfo.state !== cachedSysData.media.state;
+      if ((mediaInfo.track && (trackChanged || artistChanged)) || stateChanged) {
         sendMusic(mediaInfo.track, mediaInfo.artist); // Send music info to ESP32
         console.log(
           `🎵 Now Playing: ${mediaInfo.track} by ${mediaInfo.artist}`,
@@ -565,6 +625,12 @@ function sendWeather(weather) {
       if (err) console.log("Weather write error:", err.message);
     });
   }
+}
+
+function sendBootstrapPackets() {
+  // Ensure ESP32 receives deterministic media init on every connect/reconnect.
+  // Do not send placeholder weather here; wait for real Open-Meteo data in updateWeather().
+  sendMusic("", "");
 }
 
 //------------------------------------

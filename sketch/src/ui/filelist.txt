@@ -6,7 +6,6 @@ ui_comp_hook.c
 ui_helpers.c
 ui_events.cpp
 ui_img_taptappaw_png.c
-ui_img_wallpaper_png.c
 ui_img_main_png.c
 ui_img_leftmousepaw_png.c
 ui_img_rightpawdown_png.c

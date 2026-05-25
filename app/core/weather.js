@@ -20,6 +20,7 @@ const WEATHER_CODE_MAP = {
   71: "snow",
   73: "snow",
   75: "snow",
+  77: "snow",
   80: "rain_showers",
   81: "rain_showers",
   82: "heavy_showers",
@@ -28,13 +29,24 @@ const WEATHER_CODE_MAP = {
   99: "thunderstorm_hail",
 };
 
-function classify(code) {
-  if ([0, 1].includes(code)) return 0;//"sun";
-  if ([2, 3, 45, 48].includes(code)) return 1;//"cloud";
-  if ([51, 53, 55, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return 2;//"rain";
-  if ([95, 96, 99].includes(code)) return 3;//"storm";
-  if ([71, 73, 75, 77].includes(code)) return 4;//"snow";
-  return "unknown";
+// ESP32 wallpaper_sjpg order:
+// 0 sunny, 1 cloudy, 2 rainy, 3 stormy, 4 snowy, 5 dark/night
+function classify(code, isDay = true) {
+  const clearCodes = [0, 1];
+  const cloudCodes = [2, 3, 45, 48];
+  const rainCodes = [51, 53, 55, 61, 63, 65, 66, 67, 80, 81, 82];
+  const stormCodes = [95, 96, 99];
+  const snowCodes = [71, 73, 75, 77];
+
+  // At night (after ~6pm and before ~6am via API is_day), clear weather uses night wallpaper
+  if (clearCodes.includes(code)) return isDay ? 0 : 5;
+  if (cloudCodes.includes(code)) return isDay ? 1 : 5;
+  if (rainCodes.includes(code)) return 2;
+  if (stormCodes.includes(code)) return 3;
+  if (snowCodes.includes(code)) return 4;
+
+  // Fallback to cloudy if code is unknown
+  return 1;
 }
 
 async function getGeoLocation() {
@@ -56,7 +68,7 @@ async function getWeather(lat, lon) {
   const url =
     `https://api.open-meteo.com/v1/forecast` +
     `?latitude=${lat}&longitude=${lon}` +
-    `&current=temperature_2m,relative_humidity_2m,weather_code,precipitation` +
+    `&current=temperature_2m,relative_humidity_2m,weather_code,precipitation,is_day` +
     `&timezone=auto`;
 
   const res = await fetch(url);
@@ -64,6 +76,7 @@ async function getWeather(lat, lon) {
 
   const data = await res.json();
   const c = data.current;
+  const isDay = Number(c.is_day) === 1;
 
   return {
     temp_c: Math.round(c.temperature_2m),
@@ -71,7 +84,7 @@ async function getWeather(lat, lon) {
   //  precipitation_mm: c.precipitation,
  //   weather_code: c.weather_code,
  //   weather_text: WEATHER_CODE_MAP[c.weather_code] || "unknown",
-    weather_group: classify(c.weather_code), // sun/cloud/rain/storm/snow
+    weather_group: classify(c.weather_code, isDay), // 0..5 -> wallpaper_sjpg index
     observed_at: data.current.time,
   };
 }

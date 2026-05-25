@@ -6,6 +6,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-05-24
+### Changed
+- Faster tap response lower lag
+- Update the background + sound effect when climate changed.
+
 ## [1.0.4] - 2026-04-24
 ### Changed
 - High cpu usage on windows client app fixed.

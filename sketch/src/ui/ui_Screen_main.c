@@ -22,11 +22,8 @@ void ui_Screen_main_screen_init(void)
 {
 ui_Screen_main = lv_obj_create(NULL);
 lv_obj_clear_flag( ui_Screen_main, LV_OBJ_FLAG_SCROLLABLE );    /// Flags
-lv_obj_set_style_bg_color(ui_Screen_main, lv_color_hex(0xFCD88B), LV_PART_MAIN | LV_STATE_DEFAULT );
+lv_obj_set_style_bg_color(ui_Screen_main, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT );
 lv_obj_set_style_bg_opa(ui_Screen_main, 255, LV_PART_MAIN| LV_STATE_DEFAULT);
-lv_obj_set_style_bg_grad_color(ui_Screen_main, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT );
-lv_obj_set_style_bg_grad_dir(ui_Screen_main, LV_GRAD_DIR_VER, LV_PART_MAIN| LV_STATE_DEFAULT);
-lv_obj_set_style_bg_img_src( ui_Screen_main, &ui_img_wallpaper_png, LV_PART_MAIN | LV_STATE_DEFAULT );
 
 ui_main_Container_cat = lv_obj_create(ui_Screen_main);
 lv_obj_remove_style_all(ui_main_Container_cat);
@@ -117,7 +114,7 @@ lv_obj_set_style_pad_right(ui_main_Chart_systeminfo, 0, LV_PART_MAIN| LV_STATE_D
 lv_obj_set_style_pad_top(ui_main_Chart_systeminfo, 9, LV_PART_MAIN| LV_STATE_DEFAULT);
 lv_obj_set_style_pad_bottom(ui_main_Chart_systeminfo, 0, LV_PART_MAIN| LV_STATE_DEFAULT);
 
-lv_obj_set_style_text_color(ui_main_Chart_systeminfo, lv_color_hex(0x000000), LV_PART_TICKS | LV_STATE_DEFAULT );
+lv_obj_set_style_text_color(ui_main_Chart_systeminfo, lv_color_hex(0xFFFFFF), LV_PART_TICKS | LV_STATE_DEFAULT );
 lv_obj_set_style_text_opa(ui_main_Chart_systeminfo, 255, LV_PART_TICKS| LV_STATE_DEFAULT);
 lv_obj_set_style_text_font(ui_main_Chart_systeminfo, &ui_font_DynaPuff10, LV_PART_TICKS| LV_STATE_DEFAULT);
 
@@ -196,10 +193,10 @@ lv_img_set_pivot(ui_main_Image_secondhand,7,46);
 lv_img_set_zoom(ui_main_Image_secondhand,255);
 
 ui_main_Panel_music = lv_obj_create(ui_Screen_main);
-lv_obj_set_width( ui_main_Panel_music, lv_pct(90));
-lv_obj_set_height( ui_main_Panel_music, lv_pct(20));
+lv_obj_set_width( ui_main_Panel_music, lv_pct(95));
+lv_obj_set_height( ui_main_Panel_music, lv_pct(25));
 lv_obj_set_x( ui_main_Panel_music, 0 );
-lv_obj_set_y( ui_main_Panel_music, -33 );
+lv_obj_set_y( ui_main_Panel_music, -25 );
 lv_obj_set_align( ui_main_Panel_music, LV_ALIGN_CENTER );
 lv_obj_clear_flag( ui_main_Panel_music, LV_OBJ_FLAG_SCROLLABLE );    /// Flags
 lv_obj_set_style_bg_color(ui_main_Panel_music, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT );
@@ -227,12 +224,14 @@ lv_obj_set_style_text_align(ui_main_Label_status, LV_TEXT_ALIGN_CENTER, LV_PART_
 
 ui_main_Label_title = lv_label_create(ui_main_Panel_music);
 lv_obj_set_width( ui_main_Label_title, lv_pct(100));
-lv_obj_set_height( ui_main_Label_title, LV_SIZE_CONTENT);   /// 1
+lv_obj_set_height( ui_main_Label_title, lv_pct(60));
+lv_obj_set_x( ui_main_Label_title, 0 );
+lv_obj_set_y( ui_main_Label_title, -2 );
 lv_obj_set_align( ui_main_Label_title, LV_ALIGN_CENTER );
-lv_label_set_long_mode(ui_main_Label_title,LV_LABEL_LONG_SCROLL_CIRCULAR);
-lv_label_set_text(ui_main_Label_title,"Youtube/Spotify/Music/iTunes -");
+lv_label_set_text(ui_main_Label_title,"Youtube/Spotify/Music");
 lv_obj_clear_flag( ui_main_Label_title, LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_SNAPPABLE | LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_ELASTIC | LV_OBJ_FLAG_SCROLL_MOMENTUM | LV_OBJ_FLAG_SCROLL_CHAIN );    /// Flags
 lv_obj_set_scrollbar_mode(ui_main_Label_title, LV_SCROLLBAR_MODE_OFF);
+lv_obj_set_scroll_dir(ui_main_Label_title, LV_DIR_TOP);
 lv_obj_set_style_text_color(ui_main_Label_title, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT );
 lv_obj_set_style_text_opa(ui_main_Label_title, 255, LV_PART_MAIN| LV_STATE_DEFAULT);
 lv_obj_set_style_text_align(ui_main_Label_title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN| LV_STATE_DEFAULT);
@@ -243,7 +242,7 @@ lv_obj_set_height( ui_main_Label_artist, LV_SIZE_CONTENT);   /// 1
 lv_obj_set_x( ui_main_Label_artist, 0 );
 lv_obj_set_y( ui_main_Label_artist, 10 );
 lv_obj_set_align( ui_main_Label_artist, LV_ALIGN_BOTTOM_MID );
-lv_label_set_long_mode(ui_main_Label_artist,LV_LABEL_LONG_SCROLL_CIRCULAR);
+lv_label_set_long_mode(ui_main_Label_artist,LV_LABEL_LONG_DOT);
 lv_label_set_text(ui_main_Label_artist,"* Swipe down for setting *");
 lv_obj_clear_flag( ui_main_Label_artist, LV_OBJ_FLAG_GESTURE_BUBBLE | LV_OBJ_FLAG_SNAPPABLE | LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_SCROLL_ELASTIC | LV_OBJ_FLAG_SCROLL_MOMENTUM | LV_OBJ_FLAG_SCROLL_CHAIN );    /// Flags
 lv_obj_set_scrollbar_mode(ui_main_Label_artist, LV_SCROLLBAR_MODE_OFF);

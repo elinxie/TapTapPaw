@@ -37,7 +37,6 @@ extern lv_obj_t *ui_Startevents____initial_actions0;
 
 // IMAGES AND IMAGE SETS
 LV_IMG_DECLARE( ui_img_taptappaw_png);   // assets/taptappaw.png
-LV_IMG_DECLARE( ui_img_wallpaper_png);   // assets/wallpaper.png
 LV_IMG_DECLARE( ui_img_main_png);   // assets/main.png
 LV_IMG_DECLARE( ui_img_leftmousepaw_png);   // assets/leftMousePaw.png
 LV_IMG_DECLARE( ui_img_rightpawdown_png);   // assets/rightpawdown.png

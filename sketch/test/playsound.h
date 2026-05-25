@@ -13,14 +13,14 @@ void playAudio(const char *filename) {
     snprintf(path, sizeof(path), "/littlefs/%s", filename);
     fp = fopen(path, "rb");
     if (!fp) {
-        Serial.printf("Failed to open %s. Check if file exists in data folder.\n", path);
+        log_e("Failed to open %s. Check if file exists in data folder.\n", path);
         return;
     }
 
     reader = new WAVFileReader(fp);
-    Serial.printf("WAV File Opened. Sample Rate: %d, Channels: %d\n", 
+    log_d("WAV File Opened. Sample Rate: %d, Channels: %d\n", 
                   reader->sample_rate(), reader->num_channels());
-    Serial.printf("WAV File Opened. Sample Rate: %d\n", 
+    log_d("WAV File Opened. Sample Rate: %d\n", 
                   reader->sample_rate());
 
     if (!output) {
@@ -42,7 +42,7 @@ void playAudio(const char *filename) {
             break;
         }
     }
-    Serial.println("Finished playing audio");
+    log_d("Finished playing audio");
     fclose(fp);
     fp = nullptr;
     delete reader;
@@ -53,11 +53,11 @@ void setup() {
     Serial.begin(115200);
     
     if (!LittleFS.begin(true)) {
-        Serial.println("LittleFS Mount Failed");
+        log_e("LittleFS Mount Failed");
         return;
     }
 
-    Serial.println("Audio System Initialized");
+    ln("Audio System Initialized");
     playAudio("cute.wav");
     playAudio("squeak.wav");
     playAudio("snore.wav");

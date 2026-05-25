@@ -57,3 +57,4 @@ void load_config();
 void save_config();
 
 void initLittleFS();
+void lvgl_littlefs_init();

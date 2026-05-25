@@ -10,7 +10,7 @@ When you type on your keyboard, tiny paw taps animate on the screen.
 When you move your mouse, the character reacts playfully.
 Soft sound effects respond to clicks and keystrokes, making your workflow feel alive.
 
-Behind the cuteness is a real-time hardware bridge, designed for boards like the recommended [ESP32 2.8" purple capacitive touch screen](https://s.click.aliexpress.com/e/_c3uiGvqR). It streams system stats, clock data, and media information directly from your computer.
+Behind the cuteness is a real-time hardware bridge, designed for boards like the recommended [ESP32 2.8" purple capacitive touch screen](https://s.click.aliexpress.com/e/_c3uiGvqR) but it also works with general CYD 2.8" boards. It streams system stats, clock data, and media information directly from your computer.
 
 > TapTapPaw is not just a monitor. It’s a tiny animated desk buddy that reacts to you in real time.
 ## [Wartch on Youtube](https://youtu.be/Lp3rQJZUCo0)
@@ -22,8 +22,8 @@ Behind the cuteness is a real-time hardware bridge, designed for boards like the
 * 🕒 **Live Clock** — Analog or digital clock with animated hands
 * 🖱️ **Input Awareness** — Reacts to keyboard and mouse activity
 * 📊 **System Telemetry** — CPU, RAM, battery level, charging status
-* 🎵 **Music Status** — Displays current playback state and track info (Youtube/Spotify/Music)
-* ☀️ **Weather Condition** — Displays current weather condition by current geolocation
+* 🎵 **Music Status** — Displays current playback state and track info (YouTube/Spotify/Music)
+* ☀️ **Weather Condition** — Shows the current weather for your location and updates the background + sound effect accordingly
 * 🧸 **Cute UI** — Designed with playful animations using LVGL
 * 🔌 **Low-Latency Serial Link** — Efficient binary protocol over USB
 * 🌗 **Auto backlight**— Shifts brightness based on ambient light levels.
@@ -111,8 +111,18 @@ The firmware runs on an ESP32 and renders visuals using **LVGL**. It parses inco
 1. Install **VS Code**
 2. Install the **PlatformIO IDE** extension
 3. Open the `sketch/` folder
-4. Connect ESP32 via USB
-5. Click **Upload** in PlatformIO
+4. Open `sketch/include/app_config.h`
+5. Set the ESP32 board type by choosing one of the board constants:
+   * `USE_PURPLE_28_CAPACITIVE` — for CYD 2.8" capacitive touch variant
+   * `USE_CYD_28_1` — for CYD 2.8" variant 1
+   * `USE_CYD_28_2` — for CYD 2.8" variant 2
+
+   Example:
+   ```c
+   #define BOARD USE_PURPLE_28_CAPACITIVE
+   ```
+6. Connect ESP32 via USB
+7. Click **Upload** in PlatformIO
 
 (`For resistive touch screen only`) Touch screen calibration will be displayed during the first run, but can also be manually entered by pressing the RESET button and releasing, then pressing the BOOT (GPIO_0) button within one second and holding it for a second.
 

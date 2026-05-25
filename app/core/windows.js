@@ -45,9 +45,29 @@ const state = {
   kb: false,
   mouseMove: false,
   mouseClick: false,
+  lastInputTs: 0,
   cpu: 0,
   ram: 0
 };
+
+const KEY_LATCH_MS = 120;
+let keyPhysicalDown = false;
+let keyLatchTimer;
+
+function markInputActivity() {
+  state.lastInputTs = Date.now();
+}
+
+function updateKeyboardSignal() {
+  if (keyPhysicalDown) {
+    state.kb = true;
+    return;
+  }
+  clearTimeout(keyLatchTimer);
+  keyLatchTimer = setTimeout(() => {
+    if (!keyPhysicalDown) state.kb = false;
+  }, KEY_LATCH_MS);
+}
 
 // emitter for custom events (e.g. mouse stopped)
 //const emitter = new EventEmitter();
@@ -55,12 +75,16 @@ const state = {
 // -------- Keyboard Logging --------
 uIOhook.on('keydown', event => {
  //console.log("Key down");
+ keyPhysicalDown = true;
  state.kb = true;
+ markInputActivity();
 });
 
 uIOhook.on('keyup', event => {
   //console.log("Key up");
-  state.kb = false;
+  keyPhysicalDown = false;
+  markInputActivity();
+  updateKeyboardSignal();
 });
 
 let stopTimer;
@@ -69,6 +93,7 @@ const STOP_DELAY = 150; // ms without movement to consider "stopped"
 uIOhook.on('mousemove', event => {
  //console.log("Mouse move");
   state.mouseMove = true;
+  markInputActivity();
  // reset/arm the stop timer
  clearTimeout(stopTimer);
  stopTimer = setTimeout(() => {
@@ -81,11 +106,13 @@ uIOhook.on('mousemove', event => {
 uIOhook.on('mousedown', event => {
  // console.log("Mouse down");
  state.mouseClick = true;
+ markInputActivity();
 });
 
 uIOhook.on('mouseup', event => {
  //console.log("Mouse up");
- state.mouseClick = false;
+  state.mouseClick = false;
+  markInputActivity();
 });
 
 uIOhook.start();

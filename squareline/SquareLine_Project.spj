@@ -2076,9 +2076,9 @@
                         "flags": 4096,
                         "strtype": "_style/Text_Color",
                         "intarray": [
-                          0,
-                          0,
-                          0,
+                          255,
+                          255,
+                          255,
                           255
                         ],
                         "InheritedType": 7
@@ -3060,17 +3060,17 @@
                     "strtype": "OBJECT/Position",
                     "intarray": [
                       0,
-                      0
+                      -2
                     ],
                     "InheritedType": 7
                   },
                   {
                     "nid": 60,
-                    "flags": 50,
+                    "flags": 34,
                     "strtype": "OBJECT/Size",
                     "intarray": [
                       100,
-                      1
+                      60
                     ],
                     "InheritedType": 7
                   },
@@ -3152,7 +3152,7 @@
                   {
                     "nid": 310,
                     "strtype": "OBJECT/Scroll_direction",
-                    "strval": "ALL",
+                    "strval": "TOP",
                     "InheritedType": 3
                   },
                   {
@@ -3181,13 +3181,13 @@
                   {
                     "nid": 1020,
                     "strtype": "LABEL/Long_mode",
-                    "strval": "SCROLL_CIRCULAR",
+                    "strval": "WRAP",
                     "InheritedType": 3
                   },
                   {
                     "nid": 1030,
                     "strtype": "LABEL/Text",
-                    "strval": "Youtube/Spotify/Music/iTunes -",
+                    "strval": "Youtube/Spotify/Music",
                     "InheritedType": 10
                   },
                   {
@@ -3393,7 +3393,7 @@
                   {
                     "nid": 1020,
                     "strtype": "LABEL/Long_mode",
-                    "strval": "SCROLL_CIRCULAR",
+                    "strval": "DOT",
                     "InheritedType": 3
                   },
                   {
@@ -3655,7 +3655,7 @@
                 "strtype": "OBJECT/Position",
                 "intarray": [
                   0,
-                  -33
+                  -25
                 ],
                 "InheritedType": 7
               },
@@ -3664,8 +3664,8 @@
                 "flags": 34,
                 "strtype": "OBJECT/Size",
                 "intarray": [
-                  90,
-                  20
+                  95,
+                  25
                 ],
                 "InheritedType": 7
               },
@@ -4494,35 +4494,12 @@
                     "flags": 4096,
                     "strtype": "_style/Bg_Color",
                     "intarray": [
-                      252,
-                      216,
-                      139,
+                      0,
+                      0,
+                      0,
                       255
                     ],
                     "InheritedType": 7
-                  },
-                  {
-                    "nid": 10530,
-                    "flags": 256,
-                    "strtype": "_style/Bg_gradiens_Color",
-                    "intarray": [
-                      0,
-                      0,
-                      0
-                    ],
-                    "InheritedType": 7
-                  },
-                  {
-                    "nid": 10550,
-                    "strtype": "_style/Gradient direction",
-                    "strval": "VER",
-                    "InheritedType": 3
-                  },
-                  {
-                    "nid": 10610,
-                    "strtype": "_style/Bg_Image",
-                    "strval": "assets/wallpaper.png",
-                    "InheritedType": 5
                   }
                 ],
                 "InheritedType": 1
@@ -5041,9 +5018,9 @@
                             "flags": 4096,
                             "strtype": "_style/Outline_Color",
                             "intarray": [
-                              0,
-                              0,
-                              0,
+                              255,
+                              255,
+                              255,
                               255
                             ],
                             "InheritedType": 7
@@ -5385,9 +5362,9 @@
                             "flags": 4096,
                             "strtype": "_style/Outline_Color",
                             "intarray": [
-                              0,
-                              0,
-                              0,
+                              255,
+                              255,
+                              255,
                               255
                             ],
                             "InheritedType": 7
@@ -5696,9 +5673,9 @@
                             "flags": 4096,
                             "strtype": "_style/Outline_Color",
                             "intarray": [
-                              0,
-                              0,
-                              0,
+                              255,
+                              255,
+                              255,
                               255
                             ],
                             "InheritedType": 7
@@ -6094,9 +6071,9 @@
                             "flags": 4096,
                             "strtype": "_style/Outline_Color",
                             "intarray": [
-                              0,
-                              0,
-                              0,
+                              255,
+                              255,
+                              255,
                               255
                             ],
                             "InheritedType": 7
@@ -6675,7 +6652,7 @@
                               251,
                               201,
                               121,
-                              120
+                              250
                             ],
                             "InheritedType": 7
                           },
@@ -6974,9 +6951,9 @@
                         "flags": 4096,
                         "strtype": "_style/Text_Color",
                         "intarray": [
-                          0,
-                          0,
-                          0,
+                          255,
+                          255,
+                          255,
                           255
                         ],
                         "InheritedType": 7
@@ -7008,29 +6985,12 @@
                         "flags": 4096,
                         "strtype": "_style/Bg_Color",
                         "intarray": [
-                          255,
-                          255,
-                          255,
-                          100
+                          0,
+                          0,
+                          0,
+                          80
                         ],
                         "InheritedType": 7
-                      },
-                      {
-                        "nid": 10530,
-                        "flags": 256,
-                        "strtype": "_style/Bg_gradiens_Color",
-                        "intarray": [
-                          222,
-                          194,
-                          148
-                        ],
-                        "InheritedType": 7
-                      },
-                      {
-                        "nid": 10550,
-                        "strtype": "_style/Gradient direction",
-                        "strval": "VER",
-                        "InheritedType": 3
                       },
                       {
                         "nid": 10710,
@@ -7414,7 +7374,7 @@
                   {
                     "nid": 10610,
                     "strtype": "_style/Bg_Image",
-                    "strval": "assets/wallpaper.png",
+                    "strval": "",
                     "InheritedType": 5
                   }
                 ],
@@ -7526,7 +7486,7 @@
   },
   "animations": [],
   "selected_theme": "Default",
-  "selected_screen": "GUID68019690-935663S35841557",
+  "selected_screen": "GUID16945586-423514S413553",
   "info": {
     "name": "SquareLine_Project.spj",
     "depth": 2,
@@ -7554,7 +7514,7 @@
     "custom_variable_prefix": "uic",
     "separate_screen_save": false,
     "hierarchy_state_save": false,
-    "backup_cnt": 137,
+    "backup_cnt": 155,
     "autosave_cnt": 0,
     "group_color_cnt": 0,
     "imagebytearrayprefix": "",

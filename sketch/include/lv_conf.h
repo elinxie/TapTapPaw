@@ -128,7 +128,7 @@
  *With complex image decoders (e.g. PNG or JPG) caching can save the continuous open/decode of images.
  *However the opened images might consume additional RAM.
  *0: to disable caching*/
-#define LV_IMG_CACHE_DEF_SIZE   0
+#define LV_IMG_CACHE_DEF_SIZE   1
 
 /*Number of stops allowed per gradient. Increase this to allow more stops.
  *This adds (sizeof(lv_color_t) + 1) bytes per additional stop*/
@@ -248,7 +248,7 @@
 /*1: Show CPU usage and FPS count*/
 #define LV_USE_PERF_MONITOR 0
 #if LV_USE_PERF_MONITOR
-    #define LV_USE_PERF_MONITOR_POS LV_ALIGN_TOP_RIGHT
+    #define LV_USE_PERF_MONITOR_POS LV_ALIGN_BOTTOM_MID
 #endif
 
 /*1: Show the used memory and the memory fragmentation
@@ -611,7 +611,7 @@
 
 /* JPG + split JPG decoder library.
  * Split JPG is a custom format optimized for embedded systems. */
-#define LV_USE_SJPG 0
+#define LV_USE_SJPG 1
 
 /*GIF decoder library*/
 #define LV_USE_GIF 0

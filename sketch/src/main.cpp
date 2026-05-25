@@ -9,20 +9,17 @@
  * Partition scheme: Custom LittleFS (1.75 MB App with OTA / 300KB LittleFS)
  */
 // #define DEBUG_PACKET // Uncomment to enable serial packet debugging
-//  Library
 
 //-------------------------------------------------------
 #include <Arduino.h>
-const char *firmware_version = "1.0.3";
+const char *firmware_version = "1.0.5";
 const String version = String(firmware_version) + " | " __DATE__ "-" __TIME__;
 //-------------------------------------------------------
 #include "LGFX_CYD.h"
-#include "ui/ui.h"
-
-#include <lvgl.h>
-
 #include "accessory.h"
 #include "animation.h"
+#include "ui/ui.h"
+#include <lvgl.h>
 
 //-------------------------------------------------------
 #include "audio/I2SAudio.h"
@@ -62,9 +59,14 @@ unsigned long connect_timer = 0;
 bool app_connected = false;
 bool last_connected_state = true;
 
+// wewather icon
 const lv_img_dsc_t weather_icon[6] = {ui_img_sun_png, ui_img_cloud_png, ui_img_rain_png, ui_img_storm_png, ui_img_snow_png, ui_img_moon_png};
+// wallpaper binary files
+#include "wallpaper/wallpaper_asset.h"
+const lv_img_dsc_t *wallpaper_img[6] = {&sunny, &cloudy, &rainy, &stormy, &snowy, &night};
+const char *climate_sounds[6] = {"climate_sunny.wav", "climate_cloudy.wav", "climate_rainy.wav", "climate_stormy.wav", "climate_snowy.wav", "climate_night.wav"};
 
-//-----------------------------------
+//--------------------------------------------------------
 static void audioTask(void *param) {
   const int buffer_size = 512;
   int16_t buffer[buffer_size];
@@ -214,7 +216,7 @@ void serial_parse(byte b) {
 
   // Firmware version request: [0xFF][0x00]
   if (packetIndex == 2 && packet[0] == 0xFF && packet[1] == 0x00) {
-    Serial.println(firmware_version);
+    log_i("Firmware version: %s", firmware_version);
     packetIndex = 0;
     packetLength = 0;
     connect_timer = millis();
@@ -269,19 +271,46 @@ void serial_parse(byte b) {
       bool mouseScroll = (evt & 0x08) != 0;
 
       // keyboard tapping animation
-      if (keyDown != last_keyDown) {
-        clickSound();
+      if (keyDown) {
 
-        if (!keyDown) {
-          lv_obj_clear_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
-          lv_obj_add_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
-        } else {
-          lv_obj_clear_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
-          lv_obj_add_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
+        // keyboard up
+        lv_obj_clear_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
+        vTaskDelay(100); // delay mouse click animation
+        clickSound();
+        // clear seral buffer to avoid click sound backlog
+        while (Serial.available() > 0) {
+          Serial.read();
+          lv_task_handler(); // ensure UI updates immediately on key event
         }
-        last_keyDown = keyDown;
+
+        // keyboard down
+        lv_obj_clear_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
+
         last_sleep_check = millis(); // reset sleepy timer on key event
       }
+
+      /*
+      // keyboard tapping animation
+    if (keyDown != last_keyDown) {
+      clickSound();
+
+      if (!keyDown) {
+        lv_obj_clear_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
+      } else {
+        lv_obj_clear_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
+      }
+      last_keyDown = keyDown;
+      last_sleep_check = millis(); // reset sleepy timer on key event
+       while (Serial.available() > 0) {
+        Serial.read();
+        lv_task_handler(); // ensure UI updates immediately on key event
+      }
+    }
+*/
 
       // mouse move animation
       if (mouseMove != last_mouseMove) {
@@ -326,11 +355,17 @@ void serial_parse(byte b) {
       char time_str[6]; // HH:MM + null
       snprintf(time_str, sizeof(time_str), "%02d:%02d", packet[6], packet[7]);
 
-      if (weather_group == 0 && packet[6] >= 18 || packet[6] < 6) weather_group = 5; // moon
-
-      if (weather_group >= 0 && weather_group < 6) {
+      // climate animation - update weather icon and background based on weather group
+      static int current_weather_group = -1;
+      if (weather_group < 6 && weather_group != current_weather_group) {
+        current_weather_group = weather_group;
+        // Update wallpaper only when the weather group changes
+        lv_obj_set_style_bg_img_src(ui_Screen_main, wallpaper_img[weather_group], LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_bg_img_src(ui_Screen_setting, wallpaper_img[weather_group], LV_PART_MAIN | LV_STATE_DEFAULT);
         lv_img_set_src(ui_main_Image_weatherIcon, &weather_icon[weather_group]);
+        playAudio(climate_sounds[weather_group]);
       }
+
       String weather_info = temp_c + "°C\n" + humidity + "%\n" + time_str;
       lv_label_set_text(ui_main_Label_forecast, weather_info.c_str());
 
@@ -350,14 +385,17 @@ void setup() {
   randomSeed(esp_random());
   Serial.setRxBufferSize(2048);
   Serial.begin(115200);
+  Serial.printf("[ TapTapPaw ] - Va&Cob\nFirmware Version: %s\nBuild Time: %s %s\n\n", firmware_version, __DATE__, __TIME__);
 
   initLittleFS();
+  // init audio queue and task
   audio_queue = xQueueCreate(1, sizeof(AudioRequest));
   if (audio_queue) {
     xTaskCreatePinnedToCore(audioTask, "audioTask", 4 * 1024, nullptr, 0, &audio_task_handle, 0);
   } else {
-    Serial.println("Audio queue create failed");
+    log_e("Audio queue create failed");
   }
+
   // pin configuration
   analogSetAttenuation(ADC_0db); // 0dB(1.0 ครั้ง) 0~800mV   for LDR
   pinMode(LDR_PIN, ANALOG); // ldr analog input read brightness
@@ -381,11 +419,11 @@ void setup() {
   if (digitalRead(BUTTON_PIN) == LOW) {
     tft.calibrateTouch(calData, TFT_WHITE, TFT_BLACK, 15);
     pref.putBytes("calData", calData, sizeof(calData));
-    Serial.println("Touch calibration saved.");
+    log_i("Touch calibration saved.");
   } else {
     if (pref.getBytes("calData", calData, sizeof(calData)) == sizeof(calData)) {
       tft.setTouchCalibrate(calData);
-      Serial.println("Touch calibration loaded.");
+      log_i("Touch calibration loaded.");
     }
   }
   pref.end();
@@ -418,13 +456,29 @@ void setup() {
   indev_drv.read_cb = my_touchpad_read;
   lv_indev_drv_register(&indev_drv);
 
-  // App start here
+  // -------- App start here ---------------
+  lvgl_littlefs_init();
+
   ui_init(); // start ui and display
+  // set background image
+  lv_obj_set_style_bg_img_src(ui_Screen_setting, wallpaper_img[0], LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_img_src(ui_Screen_main, wallpaper_img[0], LV_PART_MAIN | LV_STATE_DEFAULT);
+
+  // set symbole
   lv_label_set_text(ui_main_Label_charge, LV_SYMBOL_CHARGE);
   lv_label_set_text(ui_setting_Label_version, version.c_str());
 
   // load config
   load_config();
+  
+  //test sound effect
+  /*
+  for (int i = 0; i < 6; i++) {
+    log_i("Weather sound %d: %s", i, climate_sounds[i]);
+    playAudio(climate_sounds[i]);
+    vTaskDelay(pdTICKS_TO_MS(5000)); // delay to avoid spamming logs
+  }*/
+  
 
 } // setup
 
@@ -433,7 +487,7 @@ void setup() {
 void loop() {
 #ifdef DEBUG_TOUCH
   if (tft.getTouch(&x, &y)) {
-    Serial.printf("Touch raw: %d , %d\n", x, y);
+    f("Touch raw: %d , %d\n", x, y);
   }
 #endif
 
@@ -471,6 +525,9 @@ void loop() {
       }
       lv_obj_set_style_text_color(ui_main_Label_connection, lv_color_hex(0xFFFF00), LV_PART_MAIN);
       lv_label_set_text(ui_main_Label_connection, LV_SYMBOL_WARNING);
+      lv_label_set_text(ui_main_Label_status, "[ Status ]");
+      lv_label_set_text(ui_main_Label_title, "Youtube/Spotify/Music");
+      lv_label_set_text(ui_main_Label_artist, "* Swipe down for setting *");
       // beep();
       playAudio("disconnect.wav");
     } else { // serial connected
@@ -491,6 +548,7 @@ void loop() {
   }
   // put to sleep mode
   if (!app_connected && millis() - connect_timer > SLEEPMODE_TIMEOUT) {
+    led_color(1, 1, 1); // led off
     tft.writeCommand(0x28); // display off
     tft.sleep();
     tft.setBrightness(0); // turn off backlight

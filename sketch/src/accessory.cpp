@@ -7,6 +7,8 @@
 Preferences pref;
 bool flip = false;
 
+//---------------- Sounding -------------------------
+
 uint8_t volume = 80;
 bool sound_on = true;
 uint8_t rotation = 0;
@@ -93,7 +95,7 @@ void led_color(bool r, bool g, bool b  ) {
 }
 
 
-//------------- configuration
+//------------- configuration ---------------------
 void load_config() {
   pref.begin("config", false);
  
@@ -137,18 +139,103 @@ void save_config() {
   beep();
 }
 
+//--------------- LittleFS for LVGL --------------
+//init lvgl littlefs drive S:
+static void * littlefs_open_cb(lv_fs_drv_t * drv, const char * path, lv_fs_mode_t mode) {
+    const char * flags = "r";
+
+    if (mode == LV_FS_MODE_WR) {
+        flags = "w";
+    } else if (mode == (LV_FS_MODE_WR | LV_FS_MODE_RD)) {
+        flags = "r+";
+    }
+
+    String full_path;
+
+    if (path[0] == '/') {
+        full_path = path;
+    } else {
+        full_path = "/";
+        full_path += path;
+    }
+
+    File f = LittleFS.open(full_path, flags);
+
+    if (!f) {
+        log_e("LittleFS.open FAILED: ");
+        log_e("%s", full_path.c_str());
+        return NULL;
+    }
+
+    File * fp = new File(f);
+    return fp;
+}
+
+static lv_fs_res_t littlefs_close_cb(lv_fs_drv_t * drv, void * file_p) {
+    File * fp = (File *)file_p;
+    fp->close();
+    delete fp;
+    return LV_FS_RES_OK;
+}
+
+static lv_fs_res_t littlefs_read_cb(lv_fs_drv_t * drv, void * file_p, void * buf, uint32_t btr, uint32_t * br) {
+    File * fp = (File *)file_p;
+    *br = fp->read((uint8_t *)buf, btr);
+    return LV_FS_RES_OK;
+}
+
+static lv_fs_res_t littlefs_seek_cb(lv_fs_drv_t * drv, void * file_p, uint32_t pos, lv_fs_whence_t whence) {
+    File * fp = (File *)file_p;
+
+    SeekMode mode = SeekSet;
+
+    if (whence == LV_FS_SEEK_CUR) {
+        mode = SeekCur;
+    } else if (whence == LV_FS_SEEK_END) {
+        mode = SeekEnd;
+    }
+
+    bool ok = fp->seek(pos, mode);
+    return ok ? LV_FS_RES_OK : LV_FS_RES_UNKNOWN;
+}
+
+static lv_fs_res_t littlefs_tell_cb(lv_fs_drv_t * drv, void * file_p, uint32_t * pos_p) {
+    File * fp = (File *)file_p;
+    *pos_p = fp->position();
+    return LV_FS_RES_OK;
+}
+
+
+void lvgl_littlefs_init() {
+    static lv_fs_drv_t drv;
+    lv_fs_drv_init(&drv);
+
+    drv.letter = 'S';
+    drv.open_cb = littlefs_open_cb;
+    drv.close_cb = littlefs_close_cb;
+    drv.read_cb = littlefs_read_cb;
+    drv.seek_cb = littlefs_seek_cb;
+    drv.tell_cb = littlefs_tell_cb;
+
+    lv_fs_drv_register(&drv);
+
+    log_d("LVGL LittleFS registered as S:");
+}
+
 // init LittleFS
 void initLittleFS() {
-  if (!LittleFS.begin(false)) {
-    Serial.println("LittleFS mount failed. Formatting...");
-    if (!LittleFS.begin(true)) {
-      Serial.println("LittleFS format failed!");
+    if (!LittleFS.begin(false)) {
+        log_e("LittleFS mount failed. Formatting...");
+
+        if (!LittleFS.begin(true)) {
+            log_e("LittleFS format failed!");
+        }
+
+        log_d("LittleFS formatted successfully.");
     } else {
-      Serial.println("LittleFS formatted successfully.");
+        log_d("LittleFS mounted successfully.");
     }
-  } else {
-    Serial.println("LittleFS mounted successfully.");
-   
-  }
+
+    //lvgl_littlefs_init();   // register LVGL drive S:
 }
 //--------------------------------------
