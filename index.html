@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TapTapPaw Web Sync</title>
+<link rel="icon" href="data:,">
+<script id="ttp-return">
+// Spotify sign-in lands back on this page, in a popup, as ?code=... Hand the code to the main page and close.
+// If no main page answers (popup was a plain tab), keep it in sessionStorage and reload so the page handles it itself.
+(function () {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('code') && !q.has('error')) return;
+  window.__ttpReturn = true;
+  const data = { sp: 1, code: q.get('code'), error: q.get('error'), state: q.get('state') };
+  history.replaceState({}, '', location.pathname);
+  let acked = false;
+  const bc = new BroadcastChannel('ttp-spotify');
+  bc.onmessage = (e) => { if (e.data && e.data.ack) { acked = true; document.body.textContent = 'Signed in to Spotify. You can close this window.'; window.close(); } };
+  bc.postMessage(data);
+  setTimeout(() => { if (!acked) { try { sessionStorage.setItem('ttp_sp_pending', JSON.stringify(data)); } catch (e) {} location.replace(location.pathname); } }, 1500);
+})();
+</script>
+<style>
+  :root { --bg:#16131a; --card:#221d29; --fg:#f2eaf5; --mute:#a99bb3; --acc:#f9c979; --ok:#74e3a4; --bad:#ff7b7b; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:20px; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui,sans-serif; }
+  main { max-width:760px; margin:0 auto; display:grid; gap:14px; }
+  h1 { margin:0; font-size:22px; } h2 { margin:0 0 8px; font-size:15px; color:var(--acc); }
+  section { background:var(--card); border-radius:10px; padding:14px 16px; }
+  button { background:var(--acc); color:#222; border:0; border-radius:6px; padding:7px 14px; font:inherit; cursor:pointer; }
+  button.ghost { background:#3a3243; color:var(--fg); }
+  button:disabled { opacity:.45; cursor:default; }
+  input[type=text], input[type=number], select { background:#14111a; color:var(--fg); border:1px solid #3a3243; border-radius:6px; padding:6px 8px; font:inherit; }
+  input[type=text] { width:100%; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:6px 0; }
+  .row label { color:var(--mute); }
+  .state { font-weight:600; } .ok { color:var(--ok); } .bad { color:var(--bad); }
+  .mute { color:var(--mute); font-size:13px; }
+  ul { margin:6px 0 0 18px; padding:0; } li { margin:3px 0; }
+  #log { height:190px; overflow:auto; background:#0e0c12; border-radius:6px; padding:8px; font:12px/1.4 ui-monospace,monospace; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>TapTapPaw Web Sync</h1>
+  <p class="mute" style="margin:0">Feeds time, weather and (manual) music info to the board over USB from this page. Chrome or Edge on desktop. Quit the TapTapPaw desktop app first: only one program can hold the serial port.</p>
+
+  <section>
+    <h2>Connection</h2>
+    <div class="row">
+      <button id="btnConnect">Connect to board</button>
+      <button id="btnDisconnect" class="ghost" disabled>Disconnect</button>
+      <button id="btnDry" class="ghost" title="Log the packets without a board">Dry run</button>
+      <span>Status: <span id="state" class="state">disconnected</span></span>
+    </div>
+    <div class="mute" id="support"></div>
+    <div class="mute">The board usually reboots once when the port opens; sending starts after a short wait.</div>
+  </section>
+
+  <section>
+    <h2>Time and battery</h2>
+    <div class="row">Sent every second: this computer's local time. Battery level and charging state come from the browser Battery API when Chrome offers it: <span id="batt" class="state">n/a</span></div>
+  </section>
+
+  <section>
+    <h2>Weather (Open-Meteo, no key)</h2>
+    <div class="row">
+      <button id="btnGeo" class="ghost">Use my location</button>
+      <label>lat <input id="lat" type="number" step="0.0001" style="width:110px"></label>
+      <label>lon <input id="lon" type="number" step="0.0001" style="width:110px"></label>
+      <button id="btnWeather">Send now</button>
+    </div>
+    <div class="mute">Refreshes every 15 minutes while connected. Last result: <span id="wxinfo">none yet</span></div>
+  </section>
+
+  <section>
+    <h2>Music (typed in by hand)</h2>
+    <div class="row"><input id="title" type="text" placeholder="Title"></div>
+    <div class="row"><input id="artist" type="text" placeholder="Artist"></div>
+    <div class="row">
+      <select id="media"><option value="0">Stopped</option><option value="1">Playing</option><option value="2">Paused</option></select>
+      <button id="btnMusic">Send music</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Spotify (optional)</h2>
+    <div class="row"><input id="spClient" type="text" placeholder="Your Spotify app Client ID"></div>
+    <div class="mute">Redirect URI to register in your Spotify app (exactly): <code id="spRedirect"></code> <button id="btnCopyRedirect" class="ghost">Copy</button></div>
+    <div class="row">
+      <button id="btnSpLogin">Sign in to Spotify</button>
+      <button id="btnSpLogout" class="ghost">Sign out</button>
+      <span>Spotify: <span id="spState" class="state">signed out</span></span>
+    </div>
+    <div class="mute">While signed in and connected, the board shows what your Spotify account is playing on any device (phone, speaker, desktop) and overwrites the typed title/artist. Only Spotify: other players are not visible to a web page.</div>
+  </section>
+
+  <section>
+    <h2>Device settings and mood</h2>
+    <div class="row">
+      <label><input id="fahr" type="checkbox"> Fahrenheit</label>
+      <label><input id="inv" type="checkbox"> Flip color inversion</label>
+      <button id="btnSettings">Apply to board</button>
+    </div>
+    <div class="row">
+      <button class="ghost" data-mood="0">Mood: normal</button>
+      <button class="ghost" data-mood="1">Mood: happy</button>
+      <button class="ghost" data-mood="2">Mood: sleepy</button>
+    </div>
+    <div class="mute">Settings are only sent when you press Apply, so the board keeps its own saved values otherwise.</div>
+  </section>
+
+  <section>
+    <h2>Key mapping</h2>
+    <div class="row" id="keymapRows"></div>
+    <div class="row">
+      <button id="btnKeymap">Apply key map to board</button>
+      <button id="btnKeymapDef" class="ghost">Original defaults</button>
+    </div>
+    <div class="mute">Sets what each physical key gesture does on the board (stored on the board). Key events are always reported to the page regardless.</div>
+  </section>
+
+  <section>
+    <h2>What a web page cannot do</h2>
+    <ul class="mute">
+      <li>No system-wide keyboard or mouse activity. A browser only sees input inside its own tab, so the paw does not follow your typing in other apps. Use the desktop app for that.</li>
+      <li>No CPU or memory load. The browser does not expose them, so the page sends 0 and those chart bars stay empty.</li>
+      <li>No system-wide now-playing info. The Media Session API only covers audio this page plays itself, so music is typed in above.</li>
+      <li>The tab must stay open. Timers run in a worker so a background tab keeps sending, but closing the tab or the laptop sleeping stops it.</li>
+      <li>Physical key events from the board are shown in the log below; the page cannot turn them into computer keystrokes.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script>
+// ============ packets (pure functions, byte-for-byte the same as app/core/taptappaw.js) ============
+const SRC_WEB = 2; // source tag sent in packet 0x07: 1 = desktop app (implied, never sent), 2 = web page, 3 = WiFi
+function pkt(type, data) { return Uint8Array.from([0xFF, type, data.length, ...data]); }
+function statusPacket(o) { return pkt(0x01, [o.evt|0, o.cpu|0, o.mem|0, o.batt|0, o.chg ? 1 : 0, o.h, o.m, o.s, o.media|0]); }
+function weatherPacket(o) { return pkt(0x03, [o.group, o.tempC & 0xFF, o.humidity & 0xFF, o.h, o.m]); }
+function settingsPacket(o) { return pkt(0x04, [(o.fahrenheit ? 1 : 0) | (o.invert ? 2 : 0)]); }
+function moodPacket(mood) { return pkt(0x06, [mood]); }
+function sourcePacket(src) { return pkt(0x07, [src]); }
+function firmwareRequest() { return Uint8Array.from([0xFF, 0x00]); }
+// Key map packet 0x08: six action ids, same order and numbering as KeyAction / KeySlot in sketch/src/keymap.h
+const KEY_ACTIONS = ['None', 'Paw tap', 'Happy', 'Sleepy', 'Toggle C/F', 'Toggle invert', 'Mute', 'Brightness step', 'Wallpaper next', 'App event only', 'Info toast', 'Reset taps'];
+const KEY_SLOTS = ['Key1 tap', 'Key1 hold', 'Key2 tap', 'Key2 hold', 'Key1+Key2', 'Key1+Key2 hold'];
+const DEFAULT_KEYMAP = [1, 2, 1, 3, 10, 11]; // the original behaviour
+function keymapPacket(actions) { return pkt(0x08, actions.map((a) => a | 0)); }
+function clipUtf8(str, maxBytes) { // never cut a multi-byte character in half
+  const enc = new TextEncoder(); let out = '';
+  for (const ch of str) { if (enc.encode(out + ch).length > maxBytes) break; out += ch; }
+  return enc.encode(out);
+}
+function musicPacket(title, artist) { // title/artist each <= 100 bytes keeps the packet under the firmware's 256-byte buffer
+  const t = clipUtf8(title || '', 100), a = clipUtf8(artist || '', 100);
+  return pkt(0x02, [t.length, ...t, a.length, ...a]);
+}
+// Same mapping as app/core/weather.js: 0 sunny, 1 cloudy, 2 rainy, 3 stormy, 4 snowy, 5 night
+function classify(code, isDay) {
+  if ([0, 1].includes(code)) return isDay ? 0 : 5;
+  if ([2, 3, 45, 48].includes(code)) return isDay ? 1 : 5;
+  if ([51, 53, 55, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return 2;
+  if ([95, 96, 99].includes(code)) return 3;
+  if ([71, 73, 75, 77].includes(code)) return 4;
+  return 1;
+}
+// ---- Spotify helpers (pure) ----
+function b64url(bytes) { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+async function pkceChallenge(verifier) { return b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)))); }
+// Map a /me/player/currently-playing answer (or null for HTTP 204) to what the board shows. state: 0 stopped, 1 playing, 2 paused
+function spotifyInfo(j) {
+  if (!j) return { title: '', artist: '', state: 0 };
+  if (!j.item) return j.currently_playing_type === 'ad' ? { title: 'Advertisement', artist: '', state: 1 } : { title: '', artist: '', state: 0 };
+  const it = j.item;
+  const artist = it.artists ? it.artists.map((a) => a.name).join(', ') : (it.show ? it.show.name : '');
+  return { title: it.name || '', artist, state: j.is_playing ? 1 : 2 };
+}
+// ---- UI ---- (everything below needs a browser; the packet code above is unit-tested in test-packets.mjs)
+if (!window.__ttpReturn) { // the Spotify sign-in popup only runs the small script in <head>
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const hex = (u8) => Array.from(u8, (b) => b.toString(16).padStart(2, '0')).join(' ');
+function log(msg) {
+  const el = $('log'), t = new Date().toLocaleTimeString();
+  el.textContent += `${t}  ${msg}\n`;
+  const lines = el.textContent.split('\n'); if (lines.length > 400) el.textContent = lines.slice(-300).join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+function setState(text, cls) { const s = $('state'); s.textContent = text; s.className = 'state ' + (cls || ''); }
+function store(k, v) { try { localStorage.setItem('ttp_' + k, v); } catch (e) {} }
+function load(k) { try { return localStorage.getItem('ttp_' + k); } catch (e) { return null; } }
+
+let port = null, writer = null, reader = null, readDone = null;
+let dry = false, active = false, tickWorker = null, tickFallback = null, ticks = 0, battery = null;
+
+async function send(bytes, label) {
+  if (dry) { log(`[dry] ${label}: ${hex(bytes)}`); return true; }
+  if (!writer || !active) { log(`not connected, ${label} not sent (Dry run shows the packets without a board)`); return false; }
+  try { await writer.write(bytes); return true; }
+  catch (e) { log('write failed: ' + e.message); disconnect(); return false; }
+}
+
+// ---- incoming bytes: boot/log text from the firmware, plus key event packets [FF 05 06 key type count x4] ----
+let rxState = 0, rxBuf = [], rxLen = 0, txt = [];
+const KEY_TYPES = { 1: 'press', 2: 'long press', 3: 'combo', 4: 'combo long (counter reset)' };
+function feed(bytes) {
+  for (const b of bytes) {
+    if (rxState === 0) {
+      if (b === 0xFF) { rxState = 1; rxBuf = [b]; }
+      else if (b === 10) { if (txt.length) log('board: ' + new TextDecoder().decode(Uint8Array.from(txt)).trim()); txt = []; }
+      else txt.push(b);
+      continue;
+    }
+    rxBuf.push(b);
+    if (rxState === 1) { rxState = (b === 0x05) ? 2 : 0; continue; }
+    if (rxState === 2) { rxLen = b; rxState = 3; continue; }
+    if (rxBuf.length >= 3 + rxLen) {
+      const count = (rxBuf[5] | (rxBuf[6] << 8) | (rxBuf[7] << 16) | (rxBuf[8] << 24)) >>> 0;
+      const key = rxBuf[3] === 0 ? 'Key1+Key2' : 'Key' + rxBuf[3];
+      log(`key event: ${key} ${KEY_TYPES[rxBuf[4]] || 'type ' + rxBuf[4]}, lifetime taps ${count}`);
+      rxState = 0;
+    }
+  }
+}
+async function readLoop() {
+  try {
+    reader = port.readable.getReader();
+    for (;;) { const { value, done } = await reader.read(); if (done) break; if (value) feed(value); }
+  } catch (e) { if (active) log('read stopped: ' + e.message); }
+  finally { try { reader.releaseLock(); } catch (e) {} reader = null; }
+}
+
+// ---- connect / disconnect ----
+async function connect() {
+  if (!('serial' in navigator)) { log('Web Serial is not available in this browser. Use Chrome or Edge on desktop.'); return; }
+  try { port = await navigator.serial.requestPort(); } catch (e) { log('no port chosen'); return; }
+  setState('opening...');
+  try { await port.open({ baudRate: 115200 }); }
+  catch (e) { log('open failed: ' + e.message + '. Is the TapTapPaw desktop app or a serial monitor still holding the port?'); setState('disconnected', 'bad'); port = null; return; }
+  try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (e) {}
+  writer = port.writable.getWriter();
+  readDone = readLoop();
+  active = true; dry = false; uiConnected(true);
+  setState('waiting for board to boot...');
+  await sleep(1800);
+  if (!active) return;
+  await send(firmwareRequest(), 'firmware request');
+  startTicking(); setState('connected', 'ok'); log('connected');
+}
+function connectDry() { dry = true; active = true; uiConnected(true); startTicking(); setState('dry run (no board)', 'ok'); log('dry run: packets are logged, not sent'); }
+async function disconnect() {
+  const was = active; active = false; stopTicking(); uiConnected(false);
+  try { if (reader) await reader.cancel(); } catch (e) {}
+  try { await readDone; } catch (e) {}
+  try { if (writer) { await writer.close(); } } catch (e) {} writer = null;
+  try { if (port) await port.close(); } catch (e) {} port = null;
+  setState('disconnected'); if (was) log('disconnected');
+}
+function uiConnected(on) { $('btnConnect').disabled = on; $('btnDry').disabled = on; $('btnDisconnect').disabled = !on; }
+if ('serial' in navigator) navigator.serial.addEventListener('disconnect', () => { if (active && !dry) { log('board unplugged'); disconnect(); } });
+
+// ---- 1 Hz tick. A worker keeps ticking in a background tab, where normal page timers get throttled ----
+function startTicking() {
+  ticks = 0;
+  try {
+    tickWorker = new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(1),1000)'], { type: 'text/javascript' })));
+    tickWorker.onmessage = onTick;
+  } catch (e) { log('worker unavailable, using a normal timer (may slow down in a background tab)'); tickFallback = setInterval(onTick, 1000); }
+  onTick(); fetchWeather(true); sendMusicNow();
+}
+function stopTicking() { if (tickWorker) { tickWorker.terminate(); tickWorker = null; } if (tickFallback) { clearInterval(tickFallback); tickFallback = null; } }
+async function onTick() {
+  if (!active) return;
+  ticks++;
+  const d = new Date();
+  await send(sourcePacket(SRC_WEB), 'source=web');
+  await send(statusPacket({ evt: 0, cpu: 0, mem: 0, batt: battery ? Math.round(battery.level * 100) : 0, chg: battery ? battery.charging : false,
+    h: d.getHours(), m: d.getMinutes(), s: d.getSeconds(), media: +$('media').value }), 'status');
+  if (ticks % 900 === 0) fetchWeather(true);
+  if (ticks % 4 === 0) spPoll(); // driven by the worker tick so a background tab keeps polling
+}
+
+// ---- weather ----
+async function fetchWeather(quiet) {
+  const lat = parseFloat($('lat').value), lon = parseFloat($('lon').value);
+  if (!isFinite(lat) || !isFinite(lon)) { if (!quiet) log('enter lat/lon or press "Use my location" first'); return; }
+  store('lat', lat); store('lon', lon);
+  try {
+    const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + lat + '&longitude=' + lon + '&current=temperature_2m,relative_humidity_2m,weather_code,precipitation,is_day&timezone=auto';
+    const res = await fetch(url); if (!res.ok) throw new Error('HTTP ' + res.status);
+    const c = (await res.json()).current;
+    const [h, m] = c.time.slice(11, 16).split(':').map(Number); // observation time at the location, same text the desktop app shows
+    const o = { group: classify(c.weather_code, Number(c.is_day) === 1), tempC: Math.round(c.temperature_2m), humidity: c.relative_humidity_2m, h, m };
+    $('wxinfo').textContent = `${o.tempC} C, ${o.humidity}%, group ${o.group}, observed ${c.time.slice(11, 16)}`;
+    await send(weatherPacket(o), 'weather');
+  } catch (e) { log('weather failed: ' + e.message); }
+}
+$('btnGeo').onclick = () => {
+  if (!navigator.geolocation) { log('geolocation not available; type lat/lon instead'); return; }
+  navigator.geolocation.getCurrentPosition(
+    (p) => { $('lat').value = p.coords.latitude.toFixed(4); $('lon').value = p.coords.longitude.toFixed(4); fetchWeather(false); },
+    (e) => log('location refused or unavailable (' + e.message + '); type lat/lon instead'));
+};
+$('btnWeather').onclick = () => fetchWeather(false);
+
+// ---- music, settings, mood ----
+async function sendMusicNow() { store('title', $('title').value); store('artist', $('artist').value); store('media', $('media').value); await send(musicPacket($('title').value, $('artist').value), 'music'); }
+$('btnMusic').onclick = sendMusicNow;
+$('btnSettings').onclick = () => { store('fahr', $('fahr').checked ? 1 : 0); store('inv', $('inv').checked ? 1 : 0); send(settingsPacket({ fahrenheit: $('fahr').checked, invert: $('inv').checked }), 'settings'); };
+document.querySelectorAll('[data-mood]').forEach((b) => (b.onclick = () => send(moodPacket(+b.dataset.mood), 'mood ' + b.dataset.mood)));
+$('btnConnect').onclick = connect; $('btnDisconnect').onclick = disconnect; $('btnDry').onclick = connectDry;
+
+// ---- key mapping ----
+const keySelects = KEY_SLOTS.map((name, i) => {
+  const wrap = document.createElement('label'); wrap.textContent = name + ' ';
+  const sel = document.createElement('select');
+  KEY_ACTIONS.forEach((a, v) => sel.add(new Option(a, v)));
+  sel.value = (load('km' + i) !== null ? load('km' + i) : DEFAULT_KEYMAP[i]);
+  wrap.appendChild(sel); $('keymapRows').appendChild(wrap); return sel;
+});
+$('btnKeymap').onclick = () => { keySelects.forEach((s, i) => store('km' + i, s.value)); send(keymapPacket(keySelects.map((s) => +s.value)), 'key map'); };
+$('btnKeymapDef').onclick = () => keySelects.forEach((s, i) => (s.value = DEFAULT_KEYMAP[i]));
+
+// ---- Spotify: Authorization Code with PKCE, no client secret. Needs an https (or http://127.0.0.1) page address ----
+const SP_SCOPES = 'user-read-currently-playing user-read-playback-state';
+const spRedirect = location.origin + location.pathname;
+let sp = null; try { sp = JSON.parse(load('sp_tok') || 'null'); } catch (e) {}
+let spBusy = false, spLastKey = '';
+function spRandom(n) { const a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a); }
+function spUsableAddress() { return /^https:\/\//.test(spRedirect) || /^http:\/\/127\.0\.0\.1[:/]/.test(spRedirect); }
+function setSpState() {
+  const s = $('spState');
+  if (!spUsableAddress()) { s.textContent = 'open this page from its https address (Spotify rejects file:// and localhost)'; s.className = 'state bad'; }
+  else if (sp) { s.textContent = 'signed in'; s.className = 'state ok'; }
+  else { s.textContent = 'signed out'; s.className = 'state'; }
+}
+async function spLogin() {
+  const cid = $('spClient').value.trim();
+  if (!cid) { log('paste your Spotify app Client ID first'); return; }
+  if (!spUsableAddress()) { log('Spotify only accepts https or http://127.0.0.1 redirects. Open this page from its https address.'); return; }
+  store('sp_client', cid);
+  const verifier = spRandom(48), state = spRandom(12);
+  store('sp_verifier', verifier); store('sp_state', state);
+  const url = 'https://accounts.spotify.com/authorize?' + new URLSearchParams({ response_type: 'code', client_id: cid, scope: SP_SCOPES,
+    redirect_uri: spRedirect, code_challenge_method: 'S256', code_challenge: await pkceChallenge(verifier), state });
+  const w = window.open(url, 'spotify_login', 'width=480,height=720'); // a popup keeps the board connection alive
+  if (!w && confirm('Popup blocked. Sign in in this tab instead? You will have to reconnect the board afterwards.')) location.href = url;
+}
+async function spToken(body) {
+  try {
+    const r = await fetch('https://accounts.spotify.com/api/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    const j = await r.json();
+    if (!r.ok) { log('Spotify token error: ' + (j.error_description || j.error)); return false; }
+    sp = { access: j.access_token, refresh: j.refresh_token || (sp && sp.refresh), exp: Date.now() + j.expires_in * 1000 - 30000 };
+    store('sp_tok', JSON.stringify(sp)); setSpState(); return true;
+  } catch (e) { log('Spotify token request failed: ' + e.message); return false; }
+}
+async function spHandleReturn(d) {
+  if (d.error) { log('Spotify sign-in: ' + d.error); return; }
+  if (!d.code || d.state !== load('sp_state')) { log('Spotify sign-in: unexpected answer, ignored'); return; }
+  const ok = await spToken(new URLSearchParams({ grant_type: 'authorization_code', code: d.code, redirect_uri: spRedirect, client_id: load('sp_client') || '', code_verifier: load('sp_verifier') || '' }));
+  log(ok ? 'Spotify: signed in' : 'Spotify: sign-in failed');
+}
+async function spRefresh() {
+  if (!sp || !sp.refresh) { spLogout(); return false; }
+  const ok = await spToken(new URLSearchParams({ grant_type: 'refresh_token', refresh_token: sp.refresh, client_id: load('sp_client') || '' }));
+  if (!ok) { log('Spotify: could not refresh the sign-in, please sign in again'); spLogout(); }
+  return ok;
+}
+function spLogout() { sp = null; try { localStorage.removeItem('ttp_sp_tok'); } catch (e) {} setSpState(); }
+async function spPoll() {
+  if (!sp || !active || spBusy) return;
+  spBusy = true;
+  try {
+    if (Date.now() > sp.exp && !(await spRefresh())) return;
+    const r = await fetch('https://api.spotify.com/v1/me/player/currently-playing?additional_types=episode', { headers: { Authorization: 'Bearer ' + sp.access } });
+    if (r.status === 401) { await spRefresh(); return; }
+    if (r.status === 403) { log('Spotify answered 403: the account must be on the app\'s allowlist (Spotify dashboard, User Management)'); return; }
+    if (r.status === 429) { log('Spotify rate limit, slowing down'); spBusy = true; await sleep(10000); return; }
+    if (r.status !== 200 && r.status !== 204) { log('Spotify answered HTTP ' + r.status); return; }
+    const info = spotifyInfo(r.status === 204 ? null : await r.json());
+    $('media').value = info.state;
+    const key = info.title + ' ' + info.artist;
+    if (key !== spLastKey) { spLastKey = key; $('title').value = info.title; $('artist').value = info.artist; await sendMusicNow(); log('Spotify: ' + (info.title ? info.title + ' - ' + info.artist : 'nothing playing')); }
+  } catch (e) { log('Spotify poll failed: ' + e.message); }
+  finally { spBusy = false; }
+}
+$('btnSpLogin').onclick = spLogin; $('btnSpLogout').onclick = () => { spLogout(); log('Spotify: signed out'); };
+$('btnCopyRedirect').onclick = () => navigator.clipboard.writeText(spRedirect).then(() => log('redirect URI copied'), () => log('copy failed, select the text by hand'));
+$('spRedirect').textContent = spRedirect;
+$('spClient').value = load('sp_client') || '';
+setSpState();
+try { const bc = new BroadcastChannel('ttp-spotify'); bc.onmessage = (e) => { if (e.data && e.data.sp) { bc.postMessage({ ack: true }); spHandleReturn(e.data); } }; } catch (e) {}
+try { const pend = sessionStorage.getItem('ttp_sp_pending'); if (pend) { sessionStorage.removeItem('ttp_sp_pending'); spHandleReturn(JSON.parse(pend)); } } catch (e) {}
+
+// ---- startup ----
+if (!('serial' in navigator)) { $('support').textContent = 'This browser has no Web Serial API. Open this page in Chrome or Edge on a computer.'; $('support').className = 'mute bad'; $('btnConnect').disabled = true; }
+for (const k of ['lat', 'lon', 'title', 'artist', 'media']) { const v = load(k); if (v !== null) $(k).value = v; }
+$('fahr').checked = load('fahr') === '1'; $('inv').checked = load('inv') === '1';
+if (navigator.getBattery) navigator.getBattery().then((b) => {
+  battery = b; const upd = () => ($('batt').textContent = Math.round(b.level * 100) + '%' + (b.charging ? ' (charging)' : ''));
+  upd(); b.addEventListener('levelchange', upd); b.addEventListener('chargingchange', upd);
+}).catch(() => {});
+} // end of the UI block (skipped in the Spotify sign-in popup)
+</script>
+</body>
+</html>
