@@ -16,7 +16,8 @@ A single static HTML file, no build step, no server needed. It uses the Web Seri
 
 It sends the same packets as the desktop app (status `0x01`, music `0x02`, weather `0x03`, settings `0x04`, mood `0x06`) plus a new source tag
 (`0x07`, below). Settings are only sent when you press **Apply to board**, so the board keeps its own saved values otherwise.
-Key events the board sends (`0x05`) are decoded into the page log.
+Key events the board sends (`0x05`) are decoded into the page log. The **Key mapping** section sets what each key gesture does on the
+board (`0x08`, see `KEYS_WIRING.md`).
 
 `node web-sync/test-packets.mjs` checks the packet bytes against the layouts used in `app/core/taptappaw.js`.
 

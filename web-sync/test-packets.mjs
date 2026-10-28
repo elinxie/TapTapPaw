@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const code = html.split('<script>')[1].split('// ---- UI ----')[0];
-const lib = new Function(code + '; return { pkt, statusPacket, weatherPacket, settingsPacket, moodPacket, sourcePacket, firmwareRequest, musicPacket, classify, SRC_WEB };')();
+const lib = new Function(code + '; return { pkt, statusPacket, weatherPacket, settingsPacket, moodPacket, sourcePacket, firmwareRequest, musicPacket, classify, SRC_WEB, keymapPacket, KEY_ACTIONS, KEY_SLOTS, DEFAULT_KEYMAP };')();
 const arr = (u8) => Array.from(u8);
 
 // status: [FF 01 09 evt cpu mem batt chg h m s media]
@@ -30,6 +30,12 @@ assert.deepEqual(arr(lib.settingsPacket({ fahrenheit: true, invert: true })), [0
 assert.deepEqual(arr(lib.moodPacket(2)), [0xFF, 0x06, 1, 2]);
 assert.deepEqual(arr(lib.sourcePacket(lib.SRC_WEB)), [0xFF, 0x07, 1, 2]);
 assert.deepEqual(arr(lib.firmwareRequest()), [0xFF, 0x00]);
+
+// key map: six action ids; defaults match KeyAction numbering in sketch/src/keymap.h
+assert.deepEqual(arr(lib.keymapPacket(lib.DEFAULT_KEYMAP)), [0xFF, 0x08, 6, 1, 2, 1, 3, 10, 11]);
+assert.equal(lib.KEY_ACTIONS.length, 12, 'ACT_COUNT in keymap.h');
+assert.equal(lib.KEY_ACTIONS[1], 'Paw tap'); assert.equal(lib.KEY_ACTIONS[10], 'Info toast'); assert.equal(lib.KEY_ACTIONS[11], 'Reset taps');
+assert.equal(lib.KEY_SLOTS.length, 6);
 
 // weather group mapping (same table as app/core/weather.js)
 const cases = [[0, true, 0], [1, false, 5], [3, true, 1], [45, false, 5], [63, true, 2], [95, true, 3], [75, true, 4], [999, true, 1]];
