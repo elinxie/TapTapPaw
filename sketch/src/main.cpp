@@ -18,7 +18,9 @@ const String version = String(firmware_version) + " | " __DATE__ "-" __TIME__;
 #include "LGFX_CYD.h"
 #include "accessory.h"
 #include "animation.h"
+#include "power.h"
 #include "ui/ui.h"
+#include "ui_ext.h"
 #include <lvgl.h>
 
 //-------------------------------------------------------
@@ -43,7 +45,6 @@ static volatile bool audio_playing = false;
 #define TFT_WIDTH 320
 #define TFT_HEIGHT 240
 #define CONNECTION_TIMEOUT 2000 // serial connection timeout in ms
-#define SLEEPMODE_TIMEOUT 5 * 60 * 1000 // put display to sleep after disconnect for 5 min
 
 LGFX tft; /* LGFX instance */
 // variable
@@ -177,11 +178,20 @@ void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *c
 }
 
 // touchpad callback
+static bool touch_swallow = false; // this touch only woke the display: do not click what is under the finger
 void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
   uint16_t touchX, touchY;
   bool touched = tft.getTouch(&touchX, &touchY);
 
-  if (touched) {
+  if (touched && power_activity(app_connected)) {
+    touch_swallow = true;
+  }
+  if (!touched) {
+    touch_swallow = false;
+  }
+  if (touched && touch_swallow) {
+    data->state = LV_INDEV_STATE_REL;
+  } else if (touched) {
     data->state = LV_INDEV_STATE_PR;
     data->point.x = touchX;
     data->point.y = touchY;
@@ -670,6 +680,8 @@ void setup() {
 
   keys_init(); // physical MX keys on CN1/P3
   tap_count = tap_count_load();
+  power_load(); // idle behaviour setting
+  ui_ext_init(); // "More >" button + extra settings screen
   
   //test sound effect
   /*
@@ -703,7 +715,11 @@ void loop() {
 
   KeyEvent kev;
   if (keys_poll(kev)) { // physical keys: tap, hold, combo (see handle_key_event)
-    handle_key_event(kev);
+    if (power_activity(app_connected)) {
+      keys_swallow_held(); // display was asleep: this press only wakes it, no tap and no follow-up long press
+    } else {
+      handle_key_event(kev);
+    }
   }
   keys_housekeeping();
 
@@ -737,12 +753,7 @@ void loop() {
       // beep();
       playAudio("disconnect.wav");
     } else { // serial connected
-      tft.wakeup();
-      tft.writeCommand(0x29);
-      if (!dim)
-        tft.setBrightness(brightness);
-      else
-        tft.setBrightness(dim_brightness);
+      power_wake(true); // display on at the right brightness (wakes the panel if it was asleep)
 
       led_color(1, 0, 1); // green on to serial connected
       show_source();
@@ -751,13 +762,8 @@ void loop() {
     }
     last_connected_state = app_connected;
   }
-  // put to sleep mode
-  if (!app_connected && millis() - connect_timer > SLEEPMODE_TIMEOUT) {
-    led_color(1, 1, 1); // led off
-    tft.writeCommand(0x28); // display off
-    tft.sleep();
-    tft.setBrightness(0); // turn off backlight
-  }
+  // idle dim / display sleep, a setting (power.cpp). Default: never. Replaces the fixed 5 minute sleep.
+  power_poll(app_connected);
 
   //------------------------------------
 } // loop

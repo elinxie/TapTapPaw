@@ -50,6 +50,7 @@ struct KeyEvent {
   uint8_t type;
 };
 bool keys_poll(KeyEvent &ev); // false = nothing new
+void keys_swallow_held(); // drop the press that is held right now (it only woke the display): no tap, no long-press
 
 uint32_t tap_count_load(); // lifetime physical-key tap count, kept in flash
 void tap_count_save(uint32_t count);
