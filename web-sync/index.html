@@ -5,6 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TapTapPaw Web Sync</title>
 <link rel="icon" href="data:,">
+<script id="ttp-return">
+// Spotify sign-in lands back on this page, in a popup, as ?code=... Hand the code to the main page and close.
+// If no main page answers (popup was a plain tab), keep it in sessionStorage and reload so the page handles it itself.
+(function () {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('code') && !q.has('error')) return;
+  window.__ttpReturn = true;
+  const data = { sp: 1, code: q.get('code'), error: q.get('error'), state: q.get('state') };
+  history.replaceState({}, '', location.pathname);
+  let acked = false;
+  const bc = new BroadcastChannel('ttp-spotify');
+  bc.onmessage = (e) => { if (e.data && e.data.ack) { acked = true; document.body.textContent = 'Signed in to Spotify. You can close this window.'; window.close(); } };
+  bc.postMessage(data);
+  setTimeout(() => { if (!acked) { try { sessionStorage.setItem('ttp_sp_pending', JSON.stringify(data)); } catch (e) {} location.replace(location.pathname); } }, 1500);
+})();
+</script>
 <style>
   :root { --bg:#16131a; --card:#221d29; --fg:#f2eaf5; --mute:#a99bb3; --acc:#f9c979; --ok:#74e3a4; --bad:#ff7b7b; }
   * { box-sizing:border-box; }
@@ -66,6 +82,18 @@
       <select id="media"><option value="0">Stopped</option><option value="1">Playing</option><option value="2">Paused</option></select>
       <button id="btnMusic">Send music</button>
     </div>
+  </section>
+
+  <section>
+    <h2>Spotify (optional)</h2>
+    <div class="row"><input id="spClient" type="text" placeholder="Your Spotify app Client ID"></div>
+    <div class="mute">Redirect URI to register in your Spotify app (exactly): <code id="spRedirect"></code> <button id="btnCopyRedirect" class="ghost">Copy</button></div>
+    <div class="row">
+      <button id="btnSpLogin">Sign in to Spotify</button>
+      <button id="btnSpLogout" class="ghost">Sign out</button>
+      <span>Spotify: <span id="spState" class="state">signed out</span></span>
+    </div>
+    <div class="mute">While signed in and connected, the board shows what your Spotify account is playing on any device (phone, speaker, desktop) and overwrites the typed title/artist. Only Spotify: other players are not visible to a web page.</div>
   </section>
 
   <section>
@@ -143,7 +171,19 @@ function classify(code, isDay) {
   if ([71, 73, 75, 77].includes(code)) return 4;
   return 1;
 }
+// ---- Spotify helpers (pure) ----
+function b64url(bytes) { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+async function pkceChallenge(verifier) { return b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)))); }
+// Map a /me/player/currently-playing answer (or null for HTTP 204) to what the board shows. state: 0 stopped, 1 playing, 2 paused
+function spotifyInfo(j) {
+  if (!j) return { title: '', artist: '', state: 0 };
+  if (!j.item) return j.currently_playing_type === 'ad' ? { title: 'Advertisement', artist: '', state: 1 } : { title: '', artist: '', state: 0 };
+  const it = j.item;
+  const artist = it.artists ? it.artists.map((a) => a.name).join(', ') : (it.show ? it.show.name : '');
+  return { title: it.name || '', artist, state: j.is_playing ? 1 : 2 };
+}
 // ---- UI ---- (everything below needs a browser; the packet code above is unit-tested in test-packets.mjs)
+if (!window.__ttpReturn) { // the Spotify sign-in popup only runs the small script in <head>
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const hex = (u8) => Array.from(u8, (b) => b.toString(16).padStart(2, '0')).join(' ');
@@ -244,6 +284,7 @@ async function onTick() {
   await send(statusPacket({ evt: 0, cpu: 0, mem: 0, batt: battery ? Math.round(battery.level * 100) : 0, chg: battery ? battery.charging : false,
     h: d.getHours(), m: d.getMinutes(), s: d.getSeconds(), media: +$('media').value }), 'status');
   if (ticks % 900 === 0) fetchWeather(true);
+  if (ticks % 4 === 0) spPoll(); // driven by the worker tick so a background tab keeps polling
 }
 
 // ---- weather ----
@@ -287,6 +328,78 @@ const keySelects = KEY_SLOTS.map((name, i) => {
 $('btnKeymap').onclick = () => { keySelects.forEach((s, i) => store('km' + i, s.value)); send(keymapPacket(keySelects.map((s) => +s.value)), 'key map'); };
 $('btnKeymapDef').onclick = () => keySelects.forEach((s, i) => (s.value = DEFAULT_KEYMAP[i]));
 
+// ---- Spotify: Authorization Code with PKCE, no client secret. Needs an https (or http://127.0.0.1) page address ----
+const SP_SCOPES = 'user-read-currently-playing user-read-playback-state';
+const spRedirect = location.origin + location.pathname;
+let sp = null; try { sp = JSON.parse(load('sp_tok') || 'null'); } catch (e) {}
+let spBusy = false, spLastKey = '';
+function spRandom(n) { const a = new Uint8Array(n); crypto.getRandomValues(a); return b64url(a); }
+function spUsableAddress() { return /^https:\/\//.test(spRedirect) || /^http:\/\/127\.0\.0\.1[:/]/.test(spRedirect); }
+function setSpState() {
+  const s = $('spState');
+  if (!spUsableAddress()) { s.textContent = 'open this page from its https address (Spotify rejects file:// and localhost)'; s.className = 'state bad'; }
+  else if (sp) { s.textContent = 'signed in'; s.className = 'state ok'; }
+  else { s.textContent = 'signed out'; s.className = 'state'; }
+}
+async function spLogin() {
+  const cid = $('spClient').value.trim();
+  if (!cid) { log('paste your Spotify app Client ID first'); return; }
+  if (!spUsableAddress()) { log('Spotify only accepts https or http://127.0.0.1 redirects. Open this page from its https address.'); return; }
+  store('sp_client', cid);
+  const verifier = spRandom(48), state = spRandom(12);
+  store('sp_verifier', verifier); store('sp_state', state);
+  const url = 'https://accounts.spotify.com/authorize?' + new URLSearchParams({ response_type: 'code', client_id: cid, scope: SP_SCOPES,
+    redirect_uri: spRedirect, code_challenge_method: 'S256', code_challenge: await pkceChallenge(verifier), state });
+  const w = window.open(url, 'spotify_login', 'width=480,height=720'); // a popup keeps the board connection alive
+  if (!w && confirm('Popup blocked. Sign in in this tab instead? You will have to reconnect the board afterwards.')) location.href = url;
+}
+async function spToken(body) {
+  try {
+    const r = await fetch('https://accounts.spotify.com/api/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    const j = await r.json();
+    if (!r.ok) { log('Spotify token error: ' + (j.error_description || j.error)); return false; }
+    sp = { access: j.access_token, refresh: j.refresh_token || (sp && sp.refresh), exp: Date.now() + j.expires_in * 1000 - 30000 };
+    store('sp_tok', JSON.stringify(sp)); setSpState(); return true;
+  } catch (e) { log('Spotify token request failed: ' + e.message); return false; }
+}
+async function spHandleReturn(d) {
+  if (d.error) { log('Spotify sign-in: ' + d.error); return; }
+  if (!d.code || d.state !== load('sp_state')) { log('Spotify sign-in: unexpected answer, ignored'); return; }
+  const ok = await spToken(new URLSearchParams({ grant_type: 'authorization_code', code: d.code, redirect_uri: spRedirect, client_id: load('sp_client') || '', code_verifier: load('sp_verifier') || '' }));
+  log(ok ? 'Spotify: signed in' : 'Spotify: sign-in failed');
+}
+async function spRefresh() {
+  if (!sp || !sp.refresh) { spLogout(); return false; }
+  const ok = await spToken(new URLSearchParams({ grant_type: 'refresh_token', refresh_token: sp.refresh, client_id: load('sp_client') || '' }));
+  if (!ok) { log('Spotify: could not refresh the sign-in, please sign in again'); spLogout(); }
+  return ok;
+}
+function spLogout() { sp = null; try { localStorage.removeItem('ttp_sp_tok'); } catch (e) {} setSpState(); }
+async function spPoll() {
+  if (!sp || !active || spBusy) return;
+  spBusy = true;
+  try {
+    if (Date.now() > sp.exp && !(await spRefresh())) return;
+    const r = await fetch('https://api.spotify.com/v1/me/player/currently-playing?additional_types=episode', { headers: { Authorization: 'Bearer ' + sp.access } });
+    if (r.status === 401) { await spRefresh(); return; }
+    if (r.status === 403) { log('Spotify answered 403: the account must be on the app\'s allowlist (Spotify dashboard, User Management)'); return; }
+    if (r.status === 429) { log('Spotify rate limit, slowing down'); spBusy = true; await sleep(10000); return; }
+    if (r.status !== 200 && r.status !== 204) { log('Spotify answered HTTP ' + r.status); return; }
+    const info = spotifyInfo(r.status === 204 ? null : await r.json());
+    $('media').value = info.state;
+    const key = info.title + ' ' + info.artist;
+    if (key !== spLastKey) { spLastKey = key; $('title').value = info.title; $('artist').value = info.artist; await sendMusicNow(); log('Spotify: ' + (info.title ? info.title + ' - ' + info.artist : 'nothing playing')); }
+  } catch (e) { log('Spotify poll failed: ' + e.message); }
+  finally { spBusy = false; }
+}
+$('btnSpLogin').onclick = spLogin; $('btnSpLogout').onclick = () => { spLogout(); log('Spotify: signed out'); };
+$('btnCopyRedirect').onclick = () => navigator.clipboard.writeText(spRedirect).then(() => log('redirect URI copied'), () => log('copy failed, select the text by hand'));
+$('spRedirect').textContent = spRedirect;
+$('spClient').value = load('sp_client') || '';
+setSpState();
+try { const bc = new BroadcastChannel('ttp-spotify'); bc.onmessage = (e) => { if (e.data && e.data.sp) { bc.postMessage({ ack: true }); spHandleReturn(e.data); } }; } catch (e) {}
+try { const pend = sessionStorage.getItem('ttp_sp_pending'); if (pend) { sessionStorage.removeItem('ttp_sp_pending'); spHandleReturn(JSON.parse(pend)); } } catch (e) {}
+
 // ---- startup ----
 if (!('serial' in navigator)) { $('support').textContent = 'This browser has no Web Serial API. Open this page in Chrome or Edge on a computer.'; $('support').className = 'mute bad'; $('btnConnect').disabled = true; }
 for (const k of ['lat', 'lon', 'title', 'artist', 'media']) { const v = load(k); if (v !== null) $(k).value = v; }
@@ -295,6 +408,7 @@ if (navigator.getBattery) navigator.getBattery().then((b) => {
   battery = b; const upd = () => ($('batt').textContent = Math.round(b.level * 100) + '%' + (b.charging ? ' (charging)' : ''));
   upd(); b.addEventListener('levelchange', upd); b.addEventListener('chargingchange', upd);
 }).catch(() => {});
+} // end of the UI block (skipped in the Spotify sign-in popup)
 </script>
 </body>
 </html>

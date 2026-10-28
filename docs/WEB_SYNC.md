@@ -21,13 +21,41 @@ board (`0x08`, see `KEYS_WIRING.md`).
 
 `node web-sync/test-packets.mjs` checks the packet bytes against the layouts used in `app/core/taptappaw.js`.
 
+### Spotify now-playing (optional)
+
+The page can read what your Spotify account is playing (any device) through Spotify's Web API and show it on the board. It uses
+the Authorization Code flow with PKCE, so there is no client secret anywhere; tokens stay in this browser's localStorage and **Sign out** clears them.
+It only sees Spotify. Other players (Apple Music, YouTube, local players) are not visible to a web page.
+
+Setup, once:
+1. On <https://developer.spotify.com/dashboard> create an app (Web API). Spotify's rules since February 2026: **the account that owns the app needs Premium**,
+   an app has at most **5 authorized users** (add anyone else under User Management), and one app per developer.
+2. Register the exact redirect URI the page shows. Spotify accepts only `https://...` or `http://127.0.0.1:<port>/...`, never `file://` or `localhost`,
+   so open the page from its https address (e.g. GitHub Pages, see below) or serve it on `127.0.0.1`.
+3. Paste the app's Client ID into the page, press **Sign in to Spotify** (a popup, so the board connection stays up), approve.
+4. Connect the board. While signed in and connected the page polls every 4 seconds and overwrites the typed title/artist.
+
+If Spotify answers 403, the signed-in account is not on the app's allowlist or the owner's Premium has lapsed.
+
+### Publishing the page (GitHub Pages)
+
+The page is a single file, so it is published from a small `gh-pages` branch that holds only `index.html` and `.nojekyll`:
+`https://<user>.github.io/<repo>/`. To republish after changing the page:
+
+```
+git worktree add /tmp/ttp-pages gh-pages
+git show <branch>:web-sync/index.html > /tmp/ttp-pages/index.html
+git -C /tmp/ttp-pages commit -am "Update web-sync page" && git -C /tmp/ttp-pages push
+git worktree remove /tmp/ttp-pages
+```
+
 ### What a browser page cannot do
 
 | Missing | Why |
 |---------|-----|
 | Paw following your typing, mouse-cat | A browser only sees input inside its own tab, never system-wide key or mouse events. Use the desktop app. |
 | CPU and memory bars | The browser does not expose them. The page sends 0, so those bars stay empty. |
-| Now-playing title/artist from Spotify, Music, etc. | The Media Session API only covers audio the page plays itself. Music is typed in. |
+| Now-playing from anything but Spotify | The Media Session API only covers audio the page plays itself. Spotify works through its Web API (above); everything else is typed in. |
 | Battery | Only where Chrome offers the Battery API; otherwise the page sends 0. |
 | Turning the board's keys into computer keystrokes | The ESP32 has no USB-HID, and a page cannot inject keystrokes anyway. |
 | Keeping going with the tab closed or the computer asleep | The 1 Hz timer runs in a Web Worker so a background tab is not throttled, but closing the tab stops it. |
