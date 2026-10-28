@@ -173,24 +173,95 @@ void keys_init() {
   }
 }
 
-bool keys_pressed() {
-  bool pressed = false;
+static uint32_t key_down_at[NUM_KEYS];
+static bool key_long_fired[NUM_KEYS];
+static bool key_pending[NUM_KEYS]; // press edge not yet reported
+static bool combo_latched = false;
+static bool combo_long_fired = false;
+static uint32_t combo_at = 0;
+
+bool keys_poll(KeyEvent &ev) {
   uint32_t now = millis();
+
+  // 1) debounce + edge detection
   for (uint8_t i = 0; i < NUM_KEYS; i++) {
     if (key_pins[i] < 0) continue;
     bool down = (digitalRead(key_pins[i]) == LOW);
     if (down != key_down[i] && (now - key_changed_at[i]) > KEY_DEBOUNCE_MS) {
       key_changed_at[i] = now;
       key_down[i] = down;
-      if (down) pressed = true; // report press edge only
+      if (down) {
+        key_pending[i] = true;
+        key_down_at[i] = now;
+        key_long_fired[i] = false;
+      }
     }
   }
-  return pressed;
+
+  // 2) combo (Key1 + Key2). Needs both pins enabled.
+  bool both = key_pins[0] >= 0 && key_pins[1] >= 0 && key_down[0] && key_down[1];
+  bool any = false;
+  for (uint8_t i = 0; i < NUM_KEYS; i++) any = any || key_down[i];
+  if (!any) {
+    combo_latched = false;
+    combo_long_fired = false;
+  }
+  if (both && !combo_latched) {
+    combo_latched = true;
+    combo_long_fired = false;
+    combo_at = now;
+    for (uint8_t i = 0; i < NUM_KEYS; i++) { // swallow the single-key events of this chord
+      key_pending[i] = false;
+      key_long_fired[i] = true;
+    }
+    ev = {0, KEY_EVT_COMBO};
+    return true;
+  }
+  if (combo_latched) {
+    if (both && !combo_long_fired && (now - combo_at) >= KEY_COMBO_LONG_MS) {
+      combo_long_fired = true;
+      ev = {0, KEY_EVT_COMBO_LONG};
+      return true;
+    }
+    for (uint8_t i = 0; i < NUM_KEYS; i++) key_pending[i] = false; // no stray taps while chord is held
+    return false;
+  }
+
+  // 3) single-key press edges, then long holds
+  for (uint8_t i = 0; i < NUM_KEYS; i++) {
+    if (key_pending[i]) {
+      key_pending[i] = false;
+      ev = {(uint8_t)(i + 1), KEY_EVT_PRESS};
+      return true;
+    }
+  }
+  for (uint8_t i = 0; i < NUM_KEYS; i++) {
+    if (key_pins[i] >= 0 && key_down[i] && !key_long_fired[i] && (now - key_down_at[i]) >= KEY_LONG_MS) {
+      key_long_fired[i] = true;
+      ev = {(uint8_t)(i + 1), KEY_EVT_LONG};
+      return true;
+    }
+  }
+  return false;
 }
 #else
 void keys_init() {}
-bool keys_pressed() { return false; }
+bool keys_poll(KeyEvent &ev) { return false; }
 #endif
+
+// lifetime tap counter (physical keys only)
+uint32_t tap_count_load() {
+  pref.begin("config", false);
+  uint32_t v = pref.getUInt("taps", 0);
+  pref.end();
+  return v;
+}
+
+void tap_count_save(uint32_t count) {
+  pref.begin("config", false);
+  pref.putUInt("taps", count);
+  pref.end();
+}
 
 //--------------- LittleFS for LVGL --------------
 //init lvgl littlefs drive S:

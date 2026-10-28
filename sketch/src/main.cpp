@@ -241,6 +241,100 @@ static void paw_tap(bool flush_serial) {
   last_sleep_check = millis(); // reset sleepy timer on key event
 }
 
+// ---- Physical key actions --------------------------------------------------------------
+//  short press (Key1/Key2/Key3) : paw tap + click, tap counter +1 (saved to flash when idle)
+//  hold Key1 (0.6 s)            : happy cat (eyes shut for a moment)
+//  hold Key2 (0.6 s)            : sleepy cat (falls asleep until next activity)
+//  Key1 + Key2 together         : info toast (firmware version + lifetime taps)
+//  Key1 + Key2 held 2 s         : reset tap counter
+static uint32_t tap_count = 0;
+static bool tap_dirty = false;
+static unsigned long tap_last_ms = 0;
+static lv_obj_t *toast_label = NULL;
+static unsigned long toast_until = 0;
+
+static void show_toast(const char *text, uint32_t ms = 3000) {
+  if (toast_label == NULL) {
+    toast_label = lv_label_create(lv_layer_top());
+    lv_obj_set_style_text_font(toast_label, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(toast_label, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(toast_label, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(toast_label, LV_OPA_70, LV_PART_MAIN);
+    lv_obj_set_style_radius(toast_label, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(toast_label, 6, LV_PART_MAIN);
+    lv_obj_align(toast_label, LV_ALIGN_BOTTOM_MID, 0, -8);
+  }
+  lv_label_set_text(toast_label, text);
+  lv_obj_align(toast_label, LV_ALIGN_BOTTOM_MID, 0, -8);
+  lv_obj_clear_flag(toast_label, LV_OBJ_FLAG_HIDDEN);
+  toast_until = millis() + ms;
+}
+
+// ---- Key event packet, sent to a connected TapTapPaw app (any app that speaks this protocol can use it):
+// Key event: [0xFF] [0x05] [len=6] [key] [type] [count b0] [count b1] [count b2] [count b3]
+//   key   : 1..3 = KEY1..KEY3, 0 = two-key combo
+//   type  : 1 press, 2 long press, 3 combo, 4 combo long (counter reset)
+//   count : lifetime tap counter, uint32 little-endian
+// Mood command (app -> board): [0xFF] [0x06] [len=1] [mood]   mood: 0 normal, 1 happy, 2 sleepy
+static void emit_key_event(uint8_t key, uint8_t type) {
+#if KEY_SERIAL_EVENTS
+  if (!app_connected) return; // no app listening, keep the serial line quiet
+  uint8_t pkt[9] = {0xFF, 0x05, 6, key, type,
+                    (uint8_t)(tap_count & 0xFF), (uint8_t)((tap_count >> 8) & 0xFF),
+                    (uint8_t)((tap_count >> 16) & 0xFF), (uint8_t)((tap_count >> 24) & 0xFF)};
+  Serial.write(pkt, sizeof(pkt));
+#endif
+}
+
+static void handle_key_event(const KeyEvent &ev) {
+  log_i("key event: key=%u type=%u", ev.key, ev.type);
+  switch (ev.type) {
+    case KEY_EVT_PRESS:
+      paw_tap(false);
+      tap_count++;
+      tap_dirty = true;
+      tap_last_ms = millis();
+      break;
+    case KEY_EVT_LONG:
+      if (ev.key == 1) {
+        set_mood(MOOD_HAPPY);
+        beepbeep();
+      } else if (ev.key == 2) {
+        set_mood(MOOD_SLEEPY);
+        offSound();
+      }
+      break;
+    case KEY_EVT_COMBO: {
+      char buf[48];
+      snprintf(buf, sizeof(buf), "v%s  |  taps: %lu", firmware_version, (unsigned long)tap_count);
+      show_toast(buf);
+      clickSound();
+      break;
+    }
+    case KEY_EVT_COMBO_LONG:
+      tap_count = 0;
+      tap_dirty = false;
+      tap_count_save(0);
+      show_toast("tap counter reset");
+      beepbeep();
+      break;
+    default:
+      return;
+  }
+  emit_key_event(ev.key, ev.type);
+}
+
+static void keys_housekeeping() {
+  unsigned long now = millis();
+  if (toast_label != NULL && !lv_obj_has_flag(toast_label, LV_OBJ_FLAG_HIDDEN) && now > toast_until) {
+    lv_obj_add_flag(toast_label, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (tap_dirty && now - tap_last_ms >= TAP_SAVE_IDLE_MS) {
+    tap_count_save(tap_count);
+    tap_dirty = false;
+  }
+}
+
 //---- Serial packet format for system status:
 // Status: [0xFF] [0x01] [len] [evt] [cpu] [mem] [batt] [chg] [hr] [min] [sec] [media]
 // Music:  [0xFF] [0x02] [len] [title_len] [title...] [artist_len] [artist...]
@@ -288,6 +382,8 @@ void serial_parse(byte b) {
       // Total length = data_length (packet[2]) + 3 header bytes
       packetLength = packet[2] + 3;
     } else if (packet[1] == 0x04) { // Settings Packet
+      packetLength = packet[2] + 3;
+    } else if (packet[1] == 0x06) { // Mood command
       packetLength = packet[2] + 3;
     }
 
@@ -427,6 +523,11 @@ void serial_parse(byte b) {
         save_display_prefs();
       }
 
+      // Mood command: [0xFF][0x06][len=1][mood] 0 normal, 1 happy, 2 sleepy
+    } else if (packet[1] == 0x06) {
+      if (packet[2] >= 1 && packet[3] <= MOOD_SLEEPY) {
+        set_mood(packet[3]);
+      }
     } // else packet  type is 0x02 (music), which is handled above
     // Reset packet index for next frame
     packetIndex = 0;
@@ -536,6 +637,7 @@ void setup() {
   lv_obj_add_event_cb(ui_main_Panel_weather, weather_tap_cb, LV_EVENT_CLICKED, NULL);
 
   keys_init(); // physical MX keys on CN1/P3
+  tap_count = tap_count_load();
   
   //test sound effect
   /*
@@ -567,9 +669,11 @@ void loop() {
     serial_parse(b);
   }
 
-  if (keys_pressed()) { // physical key: same paw tap + click as a PC keystroke
-    paw_tap(false);
+  KeyEvent kev;
+  if (keys_poll(kev)) { // physical keys: tap, hold, combo (see handle_key_event)
+    handle_key_event(kev);
   }
+  keys_housekeeping();
 
   //---- Update Animation every 1 second
   unsigned long current_time = millis();

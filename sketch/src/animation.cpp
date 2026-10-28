@@ -56,9 +56,38 @@ void sleepy_animation() {
   }
 }
 
+// ---- mood: HAPPY = eyes squeezed shut for a moment, SLEEPY = fall asleep now, NORMAL = wake up
+#define HAPPY_MS 2500
+static bool happy_active = false;
+static unsigned long happy_start = 0;
+
+void set_mood(uint8_t mood) {
+  unsigned long now = millis();
+  happy_active = false;
+  if (mood == MOOD_HAPPY) {
+    happy_active = true;
+    happy_start = now;
+    last_sleep_check = now; // wake up if sleepy
+  } else if (mood == MOOD_SLEEPY) {
+    last_sleep_check = now - SLEEP_TIMER; // unsigned wrap is fine: sleepy_animation() sees the timer as expired
+  } else {
+    last_sleep_check = now;
+  }
+}
+
 // eyes blinking animation (non-blocking)
 void eye_blink_animation() {
   unsigned long now = millis();
+
+  if (happy_active) {
+    if (now - happy_start < HAPPY_MS) {
+      lv_obj_clear_flag(ui_main_Image_eyelid, LV_OBJ_FLAG_HIDDEN); // eyes shut, content
+      eyelid_visible = true;
+      eyelid_show_timer = now; // normal blink logic reopens the eyes 200 ms after the mood ends
+      return;
+    }
+    happy_active = false;
+  }
 
   if (!eyelid_visible) {
     // waiting for next blink
