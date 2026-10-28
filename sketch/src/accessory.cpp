@@ -1,5 +1,6 @@
 #include "accessory.h"
 #include "animation.h"
+#include "power.h"
 #include "esp32-hal.h"
 #include "ui/ui.h"
 
@@ -73,6 +74,10 @@ unsigned long dimTimer = 0;
 
 void autoDim() {
   if (millis() - dimTimer > 3000) {
+    if (power_state() != POWER_ACTIVE) { // idle dim / sleep owns the backlight right now
+      dimTimer = millis();
+      return;
+    }
     int light = analogRead(LDR_PIN); // read light
     // Serial.printf("LDR: %d\n",light);
     if (light > LIGHT_LEVEL) { // low light
@@ -244,9 +249,17 @@ bool keys_poll(KeyEvent &ev) {
   }
   return false;
 }
+
+void keys_swallow_held() {
+  for (uint8_t i = 0; i < NUM_KEYS; i++) {
+    key_pending[i] = false;
+    if (key_down[i]) key_long_fired[i] = true; // the key that woke the display must not also fire a long press
+  }
+}
 #else
 void keys_init() {}
 bool keys_poll(KeyEvent &ev) { return false; }
+void keys_swallow_held() {}
 #endif
 
 // lifetime tap counter (physical keys only)
