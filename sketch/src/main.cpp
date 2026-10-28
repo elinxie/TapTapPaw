@@ -210,6 +210,14 @@ static void update_forecast_label() {
   lv_label_set_text(ui_main_Label_forecast, buf);
 }
 
+// Tap the weather panel on the main screen to toggle C/F (saved on the device)
+static void weather_tap_cb(lv_event_t *e) {
+  use_fahrenheit = !use_fahrenheit;
+  update_forecast_label();
+  save_display_prefs();
+  clickSound();
+}
+
 // ---- Paw tap animation + click, used by both the PC app (serial) and the physical keys ----
 static void paw_tap(bool flush_serial) {
   // paw up
@@ -522,6 +530,10 @@ void setup() {
   load_config();
   lv_obj_set_width(ui_main_Label_forecast, LV_SIZE_CONTENT); // room for "104°F"
   update_forecast_label();
+  lv_obj_add_flag(ui_main_Panel_weather, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(ui_main_Label_forecast, LV_OBJ_FLAG_EVENT_BUBBLE); // taps on the text/icon reach the panel
+  lv_obj_add_flag(ui_main_Image_weatherIcon, LV_OBJ_FLAG_EVENT_BUBBLE);
+  lv_obj_add_event_cb(ui_main_Panel_weather, weather_tap_cb, LV_EVENT_CLICKED, NULL);
 
   keys_init(); // physical MX keys on CN1/P3
   

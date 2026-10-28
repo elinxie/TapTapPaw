@@ -8,7 +8,8 @@ need npm  "comes with Node"
 need python3 "install Python 3 ('brew install python')"
 
 echo "== Desktop app deps (app/) =="
-( cd app && npm install )
+# --include=dev: Electron is a devDependency and would be skipped if NODE_ENV=production is set in your shell
+( cd app && npm install --include=dev )
 
 echo "== PlatformIO (firmware build/flash) =="
 if ! command -v pio >/dev/null 2>&1; then

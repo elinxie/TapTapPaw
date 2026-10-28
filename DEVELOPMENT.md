@@ -5,10 +5,11 @@ Quick path: `./scripts/setup-dev.sh`
 ## Desktop app (Electron)
 ```
 cd app
-npm install     # postinstall runs electron-rebuild for uiohook-napi / serialport
+npm install --include=dev   # --include=dev matters if NODE_ENV=production is set in your shell (Electron is a devDependency)
 npm run dev
 ```
 macOS: grant **Accessibility** and **Input Monitoring** to the app that launches it (Terminal / VS Code / Electron).
+Quit any installed TapTapPaw app first (only one program can hold the serial port).
 Tray menu: pick your port (e.g. `/dev/tty.usbserial-10`), then use **Temperature Unit** and **Invert Display Colors**.
 
 ## Firmware (PlatformIO)
@@ -28,3 +29,9 @@ other board constant (`USE_CYD_28_1` runs the panel without inversion).
 ## Serial protocol additions
 Settings packet: `[0xFF][0x04][len=1][flags]`, flags bit0 = Fahrenheit, bit1 = flip color inversion. Stored on the device.
 Weather temperature byte is now signed (two's complement) so sub-zero values display correctly.
+
+## Tips
+- **On-device °C/°F:** tap the weather panel on the main screen. Saved on the device.
+- **PlatformIO needs Python <= 3.13:** on macOS, Homebrew Python 3.14/3.15 broke `pip` for PlatformIO's esptool install
+  (truststore bug). Use a venv from an older Python (e.g. `/usr/bin/python3 -m venv ~/.venvs/pio && ~/.venvs/pio/bin/pip install platformio`).
+- **Wrong touch / no touch on resistive boards:** the firmware calibrates on first boot; to redo it, hold BOOT while powering up.
