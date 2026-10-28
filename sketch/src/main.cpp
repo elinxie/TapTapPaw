@@ -22,6 +22,7 @@ const String version = String(firmware_version) + " | " __DATE__ "-" __TIME__;
 #include "power.h"
 #include "ui/ui.h"
 #include "ui_ext.h"
+#include "wifi_sync.h"
 #include <lvgl.h>
 
 //-------------------------------------------------------
@@ -415,6 +416,29 @@ static void keys_housekeeping() {
   }
 }
 
+// ---- Show new weather: used by the serial weather packet (0x03) and by WiFi mode (wifi_sync.cpp)
+static void apply_weather(uint8_t weather_group, int8_t temp_c, uint8_t humidity, uint8_t hh, uint8_t mm) {
+  last_temp_c = temp_c; // signed, so sub-zero temperatures display correctly
+  last_humidity = humidity;
+
+  char time_str[6]; // HH:MM + null
+  snprintf(time_str, sizeof(time_str), "%02d:%02d", hh, mm);
+
+  // climate animation - update weather icon and background based on weather group
+  static int current_weather_group = -1;
+  if (weather_group < 6 && weather_group != current_weather_group) {
+    current_weather_group = weather_group;
+    // Update wallpaper only when the weather group changes
+    apply_wallpaper(weather_group);
+    lv_img_set_src(ui_main_Image_weatherIcon, &weather_icon[weather_group]);
+    playAudio(climate_sounds[weather_group]);
+  }
+
+  strlcpy(last_time_str, time_str, sizeof(last_time_str));
+  have_weather = true;
+  update_forecast_label();
+}
+
 // ---- Data source indicator (top right of the music panel) --------------------------------
 //  USB symbol = TapTapPaw desktop app (default for any serial feed), "WEB" = web-sync page,
 //  WiFi symbol = ESP32 WiFi mode, warning symbol = nothing connected.
@@ -427,12 +451,14 @@ static void show_source() {
   const char *txt = LV_SYMBOL_USB;
   uint32_t color = 0x00FF00;
   if (!app_connected) {
-    txt = LV_SYMBOL_WARNING;
-    color = 0xFFFF00;
+    if (wifi_sync_connected()) {
+      txt = LV_SYMBOL_WIFI; // no host, but the board is getting time and weather over WiFi
+    } else {
+      txt = LV_SYMBOL_WARNING;
+      color = 0xFFFF00;
+    }
   } else if (data_source == SRC_WEB) {
     txt = "WEB";
-  } else if (data_source == SRC_WIFI) {
-    txt = LV_SYMBOL_WIFI;
   }
   lv_obj_set_style_text_color(ui_main_Label_connection, lv_color_hex(color), LV_PART_MAIN);
   lv_label_set_text(ui_main_Label_connection, txt);
@@ -491,6 +517,8 @@ void serial_parse(byte b) {
     } else if (packet[1] == 0x07) { // Source tag
       packetLength = packet[2] + 3;
     } else if (packet[1] == 0x08) { // Key map
+      packetLength = packet[2] + 3;
+    } else if (packet[1] == 0x09 || packet[1] == 0x0A) { // WiFi credentials / location
       packetLength = packet[2] + 3;
     }
 
@@ -588,26 +616,7 @@ void serial_parse(byte b) {
 
       // packet  type is 0x03 (weather)
     } else if (packet[1] == 0x03) {
-      uint8_t weather_group = packet[3]; // weather_group (0-5)
-      last_temp_c = (int8_t)packet[4]; // signed, so sub-zero temperatures display correctly
-      last_humidity = packet[5];
-
-      char time_str[6]; // HH:MM + null
-      snprintf(time_str, sizeof(time_str), "%02d:%02d", packet[6], packet[7]);
-
-      // climate animation - update weather icon and background based on weather group
-      static int current_weather_group = -1;
-      if (weather_group < 6 && weather_group != current_weather_group) {
-        current_weather_group = weather_group;
-        // Update wallpaper only when the weather group changes
-        apply_wallpaper(weather_group);
-        lv_img_set_src(ui_main_Image_weatherIcon, &weather_icon[weather_group]);
-        playAudio(climate_sounds[weather_group]);
-      }
-
-      strlcpy(last_time_str, time_str, sizeof(last_time_str));
-      have_weather = true;
-      update_forecast_label();
+      apply_weather(packet[3], (int8_t)packet[4], packet[5], packet[6], packet[7]); // group (0-5), temp C (signed), humidity, HH, MM
 
       // Settings packet: [0xFF][0x04][len=1][flags] bit0 = Fahrenheit, bit1 = flip color inversion
     } else if (packet[1] == 0x04) {
@@ -647,6 +656,30 @@ void serial_parse(byte b) {
     } else if (packet[1] == 0x08) {
       if (packet[2] == SLOT_COUNT && keymap_set_all(&packet[3], SLOT_COUNT)) {
         ui_ext_refresh();
+      }
+
+      // WiFi credentials: [0xFF][0x09][len][ssid_len][ssid...][pass_len][pass...]  (empty ssid = forget). WiFi build only.
+    } else if (packet[1] == 0x09) {
+      uint8_t n = packet[2], sl = (n >= 2) ? packet[3] : 255;
+      if (sl <= 32 && (uint8_t)(2 + sl) <= n) {
+        uint8_t pl = packet[4 + sl];
+        if (pl <= 63 && (uint8_t)(2 + sl + pl) == n) {
+          char ssid_buf[33], pass_buf[64];
+          memcpy(ssid_buf, &packet[4], sl);
+          ssid_buf[sl] = '\0';
+          memcpy(pass_buf, &packet[5 + sl], pl);
+          pass_buf[pl] = '\0';
+          wifi_sync_set_credentials(ssid_buf, pass_buf);
+        }
+      }
+
+      // WiFi location: [0xFF][0x0A][len=8][lat int32 LE][lon int32 LE], degrees * 100000
+    } else if (packet[1] == 0x0A) {
+      if (packet[2] == 8) {
+        int32_t la, lo;
+        memcpy(&la, &packet[3], 4);
+        memcpy(&lo, &packet[7], 4);
+        wifi_sync_set_location(la / 100000.0f, lo / 100000.0f);
       }
     } // else packet  type is 0x02 (music), which is handled above
     // Reset packet index for next frame
@@ -761,6 +794,7 @@ void setup() {
   keymap_load(); // key gesture -> action map
   power_load(); // idle behaviour setting
   ui_ext_init(); // "More >" button + extra settings screen
+  wifi_sync_begin(); // WiFi mode task (no-op in the normal build)
   
   //test sound effect
   /*
@@ -807,7 +841,16 @@ void loop() {
   if (current_time - last_chart_update >= 1000) {
     last_chart_update = current_time;
     chart_animation(cpu, mem_used, battery, charging); // Update chart with current system status from packet
-    clock_animation(packet[8], packet[9], packet[10]); // Update clock animation with current time from packet
+    uint8_t clk_h = packet[8], clk_m = packet[9], clk_s = packet[10]; // time from the last status packet
+    if (!app_connected) {
+      uint8_t wh, wm, ws;
+      if (wifi_sync_time(wh, wm, ws)) { // no host: use NTP time from WiFi mode if it has synced
+        clk_h = wh;
+        clk_m = wm;
+        clk_s = ws;
+      }
+    }
+    clock_animation(clk_h, clk_m, clk_s); // Update clock animation
     media_play_status((packet[11])); // Update media status based on packet data
   }
 
@@ -843,6 +886,19 @@ void loop() {
   }
   // idle dim / display sleep, a setting (power.cpp). Default: never. Replaces the fixed 5 minute sleep.
   power_poll(app_connected);
+
+  // WiFi mode: idles while a serial host is connected; shows its weather when there is none
+  wifi_sync_host_present(app_connected);
+  static bool last_wifi_up = false;
+  bool wifi_up = wifi_sync_connected();
+  if (wifi_up != last_wifi_up) {
+    last_wifi_up = wifi_up;
+    show_source();
+  }
+  WifiWeather ww;
+  if (!app_connected && wifi_sync_poll_weather(ww)) {
+    apply_weather(ww.group, ww.temp_c, ww.humidity, ww.hour, ww.minute);
+  }
 
   //------------------------------------
 } // loop

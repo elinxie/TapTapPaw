@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const code = html.split('<script>')[1].split('// ---- UI ----')[0];
-const lib = new Function(code + '; return { pkt, statusPacket, weatherPacket, settingsPacket, moodPacket, sourcePacket, firmwareRequest, musicPacket, classify, SRC_WEB, keymapPacket, KEY_ACTIONS, KEY_SLOTS, DEFAULT_KEYMAP, b64url, pkceChallenge, spotifyInfo };')();
+const lib = new Function(code + '; return { pkt, statusPacket, weatherPacket, settingsPacket, moodPacket, sourcePacket, firmwareRequest, musicPacket, classify, SRC_WEB, keymapPacket, KEY_ACTIONS, KEY_SLOTS, DEFAULT_KEYMAP, b64url, pkceChallenge, spotifyInfo, wifiPacket, locationPacket };')();
 const arr = (u8) => Array.from(u8);
 
 // status: [FF 01 09 evt cpu mem batt chg h m s media]
@@ -40,6 +40,13 @@ assert.equal(lib.KEY_SLOTS.length, 6);
 // weather group mapping (same table as app/core/weather.js)
 const cases = [[0, true, 0], [1, false, 5], [3, true, 1], [45, false, 5], [63, true, 2], [95, true, 3], [75, true, 4], [999, true, 1]];
 for (const [code, day, want] of cases) assert.equal(lib.classify(code, day), want, `classify(${code}, ${day})`);
+
+// WiFi credentials 0x09: [ssid_len][ssid][pass_len][pass]; len byte = 2 + ssid + pass. Empty ssid forgets.
+assert.deepEqual(arr(lib.wifiPacket('ab', 'xyz')), [0xFF, 0x09, 7, 2, 0x61, 0x62, 3, 0x78, 0x79, 0x7A]);
+assert.deepEqual(arr(lib.wifiPacket('', '')), [0xFF, 0x09, 2, 0, 0]);
+const wl = lib.wifiPacket('s'.repeat(40), 'p'.repeat(90)); assert.equal(wl[3], 32); assert.equal(wl[4 + 32], 63); assert.equal(wl[2], 2 + 32 + 63);
+// location 0x0A: degrees * 1e5 as int32 little-endian
+assert.deepEqual(arr(lib.locationPacket(37.3713, -122.0296)), [0xFF, 0x0A, 8, ...[3737130, -12202960].flatMap((v) => { const b = Buffer.alloc(4); b.writeInt32LE(v); return [...b]; })]);
 
 // Spotify: PKCE S256 test vector from RFC 7636 appendix B
 assert.equal(await lib.pkceChallenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'), 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM');

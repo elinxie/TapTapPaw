@@ -60,20 +60,11 @@ git worktree remove /tmp/ttp-pages
 | Turning the board's keys into computer keystrokes | The ESP32 has no USB-HID, and a page cannot inject keystrokes anyway. |
 | Keeping going with the tab closed or the computer asleep | The 1 Hz timer runs in a Web Worker so a background tab is not throttled, but closing the tab stops it. |
 
-## Option B: ESP32 WiFi mode (not built: does not fit)
+## Option B: ESP32 WiFi mode (opt-in build)
 
-Measured with a throwaway probe that links what WiFi mode would need (STA connect, NTP, an HTTP GET to Open-Meteo, Preferences),
-default partition table, `-DINVERT_COLORS_DEFAULT=1`:
-
-| Build | Flash used | Of 1,441,792 byte app partition |
-|-------|-----------|----------------------------------|
-| Current firmware | 1,273,145 | 88.3% |
-| + WiFi, NTP, plain HTTP | 1,930,469 | 133.9% (about 489 KB too big) |
-| + WiFi, NTP, HTTPS (TLS) | 1,929,965 | 133.9% |
-
-The WiFi stack alone is about 657 KB, and TLS adds almost nothing on top of it, so dropping HTTPS does not help
-(Open-Meteo does answer plain HTTP). Fitting it needs either a bigger app partition (drops the unused OTA slot) or removing most of the
-wallpaper images. Neither was done; see the PR description.
+The board can fetch time and weather itself. It does not fit the normal app partition (measured: WiFi + NTP + HTTP was 1,930,469 bytes,
+133.9% of the 1,441,792 byte partition; TLS added almost nothing on top of the WiFi stack), so it is a separate build with a larger
+partition table. See `WIFI_MODE.md`. The web page has a **Board WiFi** section to send the network name, password and location.
 
 ## Data source indicator
 
@@ -83,7 +74,7 @@ Top right of the music panel on the main screen:
 |-------|---------|
 | USB symbol (green) | A serial feed, assumed to be the desktop app |
 | `WEB` (green) | The web page (it sends source tag `0x07` every second) |
-| WiFi symbol (green) | Reserved for a future WiFi mode; not produced today |
+| WiFi symbol (green) | No host, and the board is on WiFi (WiFi build only) |
 | Warning symbol (yellow) | Nothing connected |
 
 Source packet, host to board: `[0xFF] [0x07] [len=1] [src]` with `src` 1 = desktop app, 2 = web page. Hosts that never send it

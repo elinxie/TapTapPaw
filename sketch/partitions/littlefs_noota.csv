@@ -1,0 +1,8 @@
+# Same layout as littlefs_1mb_ota.csv but without the second OTA slot, so the app can grow to 2.75 MB (needed for WiFi).
+# nvs (settings, touch calibration) and spiffs (LittleFS sounds) keep their offsets, so neither is erased.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  factory, 0x10000,  0x2C0000,
+spiffs,   data, spiffs,  0x2D0000, 0x100000,
+coredump, data, coredump,0x3D0000, 0x10000,

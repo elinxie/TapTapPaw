@@ -122,6 +122,19 @@
   </section>
 
   <section>
+    <h2>Board WiFi (standalone mode)</h2>
+    <div class="row">
+      <input id="wifiSsid" type="text" placeholder="WiFi name (2.4 GHz)" autocomplete="off">
+      <input id="wifiPass" type="password" placeholder="WiFi password" autocomplete="new-password" style="width:100%;background:#14111a;color:var(--fg);border:1px solid #3a3243;border-radius:6px;padding:6px 8px;font:inherit">
+    </div>
+    <div class="row">
+      <button id="btnWifi">Send WiFi and location to board</button>
+      <button id="btnWifiForget" class="ghost">Forget WiFi on board</button>
+    </div>
+    <div class="mute">Needs the WiFi firmware build (<code>esp32dev_wifi</code>). Lets the board show time and weather with only USB power, no computer. It uses the lat/lon from the Weather section. The password is stored unencrypted in the board's flash and is never saved by this page. 2.4 GHz WPA2/WPA3-personal only: company (802.1X) networks and sign-in-page networks will not work. The board's reply shows in the log.</div>
+  </section>
+
+  <section>
     <h2>What a web page cannot do</h2>
     <ul class="mute">
       <li>No system-wide keyboard or mouse activity. A browser only sees input inside its own tab, so the paw does not follow your typing in other apps. Use the desktop app for that.</li>
@@ -153,6 +166,13 @@ const KEY_ACTIONS = ['None', 'Paw tap', 'Happy', 'Sleepy', 'Toggle C/F', 'Toggle
 const KEY_SLOTS = ['Key1 tap', 'Key1 hold', 'Key2 tap', 'Key2 hold', 'Key1+Key2', 'Key1+Key2 hold'];
 const DEFAULT_KEYMAP = [1, 2, 1, 3, 10, 11]; // the original behaviour
 function keymapPacket(actions) { return pkt(0x08, actions.map((a) => a | 0)); }
+// WiFi mode (firmware built from the esp32dev_wifi env): credentials 0x09 (empty ssid = forget) and location 0x0A (degrees * 1e5, int32 LE)
+function wifiPacket(ssid, pass) { const s = clipUtf8(ssid || '', 32), p = clipUtf8(pass || '', 63); return pkt(0x09, [s.length, ...s, p.length, ...p]); }
+function locationPacket(lat, lon) {
+  const b = new Uint8Array(8), dv = new DataView(b.buffer);
+  dv.setInt32(0, Math.round(lat * 1e5), true); dv.setInt32(4, Math.round(lon * 1e5), true);
+  return pkt(0x0A, Array.from(b));
+}
 function clipUtf8(str, maxBytes) { // never cut a multi-byte character in half
   const enc = new TextEncoder(); let out = '';
   for (const ch of str) { if (enc.encode(out + ch).length > maxBytes) break; out += ch; }
@@ -201,7 +221,7 @@ let port = null, writer = null, reader = null, readDone = null;
 let dry = false, active = false, tickWorker = null, tickFallback = null, ticks = 0, battery = null;
 
 async function send(bytes, label) {
-  if (dry) { log(`[dry] ${label}: ${hex(bytes)}`); return true; }
+  if (dry) { log(`[dry] ${label}: ${label === 'wifi credentials' ? '(hidden, contains the password)' : hex(bytes)}`); return true; }
   if (!writer || !active) { log(`not connected, ${label} not sent (Dry run shows the packets without a board)`); return false; }
   try { await writer.write(bytes); return true; }
   catch (e) { log('write failed: ' + e.message); disconnect(); return false; }
@@ -327,6 +347,20 @@ const keySelects = KEY_SLOTS.map((name, i) => {
 });
 $('btnKeymap').onclick = () => { keySelects.forEach((s, i) => store('km' + i, s.value)); send(keymapPacket(keySelects.map((s) => +s.value)), 'key map'); };
 $('btnKeymapDef').onclick = () => keySelects.forEach((s, i) => (s.value = DEFAULT_KEYMAP[i]));
+
+// ---- board WiFi ----
+$('wifiSsid').value = load('wifi_ssid') || '';
+$('btnWifi').onclick = async () => {
+  const ssid = $('wifiSsid').value;
+  if (!ssid) { log('enter the WiFi name first'); return; }
+  store('wifi_ssid', ssid); // the password is deliberately not stored
+  await send(wifiPacket(ssid, $('wifiPass').value), 'wifi credentials');
+  const lat = parseFloat($('lat').value), lon = parseFloat($('lon').value);
+  if (isFinite(lat) && isFinite(lon)) await send(locationPacket(lat, lon), 'wifi location');
+  else log('no lat/lon set: the board will connect but cannot fetch weather until you send a location');
+  $('wifiPass').value = '';
+};
+$('btnWifiForget').onclick = () => send(wifiPacket('', ''), 'wifi credentials');
 
 // ---- Spotify: Authorization Code with PKCE, no client secret. Needs an https (or http://127.0.0.1) page address ----
 const SP_SCOPES = 'user-read-currently-playing user-read-playback-state';
