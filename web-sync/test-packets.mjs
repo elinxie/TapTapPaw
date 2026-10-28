@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const code = html.split('<script>')[1].split('// ---- UI ----')[0];
-const lib = new Function(code + '; return { pkt, statusPacket, weatherPacket, settingsPacket, moodPacket, sourcePacket, firmwareRequest, musicPacket, classify, SRC_WEB, keymapPacket, KEY_ACTIONS, KEY_SLOTS, DEFAULT_KEYMAP };')();
+const lib = new Function(code + '; return { pkt, statusPacket, weatherPacket, settingsPacket, moodPacket, sourcePacket, firmwareRequest, musicPacket, classify, SRC_WEB, keymapPacket, KEY_ACTIONS, KEY_SLOTS, DEFAULT_KEYMAP, b64url, pkceChallenge, spotifyInfo };')();
 const arr = (u8) => Array.from(u8);
 
 // status: [FF 01 09 evt cpu mem batt chg h m s media]
@@ -40,5 +40,16 @@ assert.equal(lib.KEY_SLOTS.length, 6);
 // weather group mapping (same table as app/core/weather.js)
 const cases = [[0, true, 0], [1, false, 5], [3, true, 1], [45, false, 5], [63, true, 2], [95, true, 3], [75, true, 4], [999, true, 1]];
 for (const [code, day, want] of cases) assert.equal(lib.classify(code, day), want, `classify(${code}, ${day})`);
+
+// Spotify: PKCE S256 test vector from RFC 7636 appendix B
+assert.equal(await lib.pkceChallenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'), 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM');
+assert.equal(lib.b64url(Uint8Array.from([0xfb, 0xff, 0xfe])), '-__-'); // url-safe alphabet, no padding
+
+// Spotify: currently-playing answers. 204 (null) = nothing playing
+assert.deepEqual(lib.spotifyInfo(null), { title: '', artist: '', state: 0 });
+assert.deepEqual(lib.spotifyInfo({ is_playing: true, currently_playing_type: 'track', item: { name: 'Song', artists: [{ name: 'A' }, { name: 'B' }] } }), { title: 'Song', artist: 'A, B', state: 1 });
+assert.deepEqual(lib.spotifyInfo({ is_playing: false, item: { name: 'Song', artists: [{ name: 'A' }] } }), { title: 'Song', artist: 'A', state: 2 });
+assert.deepEqual(lib.spotifyInfo({ is_playing: true, currently_playing_type: 'episode', item: { name: 'Ep 1', show: { name: 'The Show' } } }), { title: 'Ep 1', artist: 'The Show', state: 1 });
+assert.deepEqual(lib.spotifyInfo({ is_playing: true, currently_playing_type: 'ad', item: null }), { title: 'Advertisement', artist: '', state: 1 });
 
 console.log('web-sync packet tests: all passed');
