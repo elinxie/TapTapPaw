@@ -26,4 +26,8 @@
 #define KEY2_PIN 27 // CN1
 #define KEY3_PIN -1 // optional: 35 (P3, input-only, needs an external 10k pull-up to 3V3). -1 = unused
 #define KEY_DEBOUNCE_MS 25
+#define KEY_LONG_MS 600 // hold one key this long = mood (Key1 happy, Key2 sleepy)
+#define KEY_COMBO_LONG_MS 2000 // hold Key1+Key2 this long = reset tap counter
+#define TAP_SAVE_IDLE_MS 3000 // save tap counter to flash after this much idle time (limits flash wear)
+#define KEY_SERIAL_EVENTS 1 // 1 = send key events to a connected TapTapPaw app (see protocol note in main.cpp)
 //-------------------------------------------

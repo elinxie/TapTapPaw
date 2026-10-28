@@ -17,6 +17,10 @@ extern lv_timer_t *random_mouse_timer;
 // sleepy animation (non-blocking)
 // eyes blinking animation (non-blocking)
 void sleepy_animation();
+
+// cat mood, triggered by physical keys or the PC app (serial packet 0x06)
+enum Mood : uint8_t { MOOD_NORMAL = 0, MOOD_HAPPY = 1, MOOD_SLEEPY = 2 };
+void set_mood(uint8_t mood);
 void eye_blink_animation();
 void random_mouse_task(lv_timer_t *timer);
 // analog clock animation

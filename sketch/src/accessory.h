@@ -37,7 +37,22 @@ void save_display_prefs(); // persist invert_flip + use_fahrenheit (no beep)
 
 // physical keys (MX switches on CN1/P3)
 void keys_init();
-bool keys_pressed(); // true once per new key press (debounced)
+
+// One event per keys_poll() call. key = 1..3, or 0 for the two-key combo.
+enum KeyEventType : uint8_t {
+  KEY_EVT_PRESS = 1,       // key went down (debounced)
+  KEY_EVT_LONG = 2,        // key held for KEY_LONG_MS (fires once per hold)
+  KEY_EVT_COMBO = 3,       // Key1 + Key2 both down
+  KEY_EVT_COMBO_LONG = 4   // Key1 + Key2 held for KEY_COMBO_LONG_MS
+};
+struct KeyEvent {
+  uint8_t key;
+  uint8_t type;
+};
+bool keys_poll(KeyEvent &ev); // false = nothing new
+
+uint32_t tap_count_load(); // lifetime physical-key tap count, kept in flash
+void tap_count_save(uint32_t count);
 
 void initSpeaker();
 
