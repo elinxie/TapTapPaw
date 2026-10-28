@@ -18,6 +18,7 @@ const String version = String(firmware_version) + " | " __DATE__ "-" __TIME__;
 #include "LGFX_CYD.h"
 #include "accessory.h"
 #include "animation.h"
+#include "keymap.h"
 #include "power.h"
 #include "ui/ui.h"
 #include "ui_ext.h"
@@ -296,42 +297,111 @@ static void emit_key_event(uint8_t key, uint8_t type) {
 #endif
 }
 
-static void handle_key_event(const KeyEvent &ev) {
-  log_i("key event: key=%u type=%u", ev.key, ev.type);
-  switch (ev.type) {
-    case KEY_EVT_PRESS:
+// ---- Wallpaper (weather picks one; the ACT_WALLPAPER_NEXT key action can override it until the weather group changes)
+static const char *wallpaper_names[6] = {"sunny", "cloudy", "rainy", "stormy", "snowy", "night"};
+static uint8_t wallpaper_idx = 0;
+static void apply_wallpaper(uint8_t idx) {
+  wallpaper_idx = idx;
+  lv_obj_set_style_bg_img_src(ui_Screen_main, wallpaper_img[idx], LV_PART_MAIN | LV_STATE_DEFAULT);
+  lv_obj_set_style_bg_img_src(ui_Screen_setting, wallpaper_img[idx], LV_PART_MAIN | LV_STATE_DEFAULT);
+}
+
+// ---- Key actions. Which gesture runs which action is the key map (keymap.cpp, settings screen "More >").
+// Defaults equal the original behaviour: tap = paw tap, Key1 hold = happy, Key2 hold = sleepy,
+// Key1+Key2 = info toast, Key1+Key2 held = reset tap counter.
+static void run_key_action(uint8_t action) {
+  char buf[48];
+  switch (action) {
+    case ACT_PAW_TAP:
       paw_tap(false);
       tap_count++;
       tap_dirty = true;
       tap_last_ms = millis();
       break;
-    case KEY_EVT_LONG:
-      if (ev.key == 1) {
-        set_mood(MOOD_HAPPY);
-        beepbeep();
-      } else if (ev.key == 2) {
-        set_mood(MOOD_SLEEPY);
-        offSound();
-      }
+    case ACT_HAPPY:
+      set_mood(MOOD_HAPPY);
+      beepbeep();
       break;
-    case KEY_EVT_COMBO: {
-      char buf[48];
+    case ACT_SLEEPY:
+      set_mood(MOOD_SLEEPY);
+      offSound();
+      break;
+    case ACT_TOGGLE_UNIT:
+      use_fahrenheit = !use_fahrenheit;
+      update_forecast_label();
+      save_display_prefs();
+      clickSound();
+      break;
+    case ACT_TOGGLE_INVERT:
+      invert_flip = !invert_flip;
+      tft.invertDisplay(invert_flip);
+      lv_obj_invalidate(lv_scr_act());
+      save_display_prefs();
+      clickSound();
+      break;
+    case ACT_MUTE:
+      sound_on = !sound_on;
+      if (sound_on) {
+        lv_obj_add_state(ui_setting_Switch_sound, LV_STATE_CHECKED);
+      } else {
+        lv_obj_clear_state(ui_setting_Switch_sound, LV_STATE_CHECKED);
+      }
+      pref.begin("config", false);
+      pref.putBool("sound_on", sound_on);
+      pref.end();
+      show_toast(sound_on ? "sound on" : "sound off", 1500);
+      clickSound(); // silent when just muted
+      break;
+    case ACT_BRIGHTNESS_STEP: {
+      static const uint8_t steps[] = {20, 60, 100, 150, 200}; // slider range is 1..200
+      uint8_t next = steps[0];
+      for (uint8_t s : steps) {
+        if (s > brightness) {
+          next = s;
+          break;
+        }
+      }
+      brightness = next;
+      if (!dim) tft.setBrightness(brightness); // in the dark the light sensor dim level stays in charge
+      lv_slider_set_value(ui_setting_Slider_backlight, brightness, LV_ANIM_OFF);
+      pref.begin("config", false);
+      pref.putUChar("brightness", brightness);
+      pref.end();
+      snprintf(buf, sizeof(buf), "brightness %u%%", (unsigned)(brightness * 100 / 200));
+      show_toast(buf, 1500);
+      clickSound();
+      break;
+    }
+    case ACT_WALLPAPER_NEXT:
+      apply_wallpaper((wallpaper_idx + 1) % 6);
+      snprintf(buf, sizeof(buf), "wallpaper: %s", wallpaper_names[wallpaper_idx]);
+      show_toast(buf, 1500);
+      clickSound();
+      break;
+    case ACT_INFO:
       snprintf(buf, sizeof(buf), "v%s  |  taps: %lu", firmware_version, (unsigned long)tap_count);
       show_toast(buf);
       clickSound();
       break;
-    }
-    case KEY_EVT_COMBO_LONG:
+    case ACT_RESET_TAPS:
       tap_count = 0;
       tap_dirty = false;
       tap_count_save(0);
       show_toast("tap counter reset");
       beepbeep();
       break;
+    case ACT_NONE:
+    case ACT_APP_ONLY:
     default:
-      return;
+      break; // nothing locally
   }
-  emit_key_event(ev.key, ev.type);
+}
+
+static void handle_key_event(const KeyEvent &ev) {
+  log_i("key event: key=%u type=%u", ev.key, ev.type);
+  if (ev.type < KEY_EVT_PRESS || ev.type > KEY_EVT_COMBO_LONG) return;
+  run_key_action(keymap_action(ev.key, ev.type));
+  emit_key_event(ev.key, ev.type); // sent for every gesture, whatever it is mapped to
 }
 
 static void keys_housekeeping() {
@@ -419,6 +489,8 @@ void serial_parse(byte b) {
     } else if (packet[1] == 0x06) { // Mood command
       packetLength = packet[2] + 3;
     } else if (packet[1] == 0x07) { // Source tag
+      packetLength = packet[2] + 3;
+    } else if (packet[1] == 0x08) { // Key map
       packetLength = packet[2] + 3;
     }
 
@@ -528,8 +600,7 @@ void serial_parse(byte b) {
       if (weather_group < 6 && weather_group != current_weather_group) {
         current_weather_group = weather_group;
         // Update wallpaper only when the weather group changes
-        lv_obj_set_style_bg_img_src(ui_Screen_main, wallpaper_img[weather_group], LV_PART_MAIN | LV_STATE_DEFAULT);
-        lv_obj_set_style_bg_img_src(ui_Screen_setting, wallpaper_img[weather_group], LV_PART_MAIN | LV_STATE_DEFAULT);
+        apply_wallpaper(weather_group);
         lv_img_set_src(ui_main_Image_weatherIcon, &weather_icon[weather_group]);
         playAudio(climate_sounds[weather_group]);
       }
@@ -569,6 +640,13 @@ void serial_parse(byte b) {
       if (packet[2] >= 1 && (packet[3] == SRC_USB_APP || packet[3] == SRC_WEB) && packet[3] != data_source) {
         data_source = packet[3];
         show_source();
+      }
+
+      // Key map: [0xFF][0x08][len=6][K1 tap][K1 hold][K2 tap][K2 hold][combo][combo hold], values are KeyAction (keymap.h).
+      // The whole packet is ignored if any value is out of range.
+    } else if (packet[1] == 0x08) {
+      if (packet[2] == SLOT_COUNT && keymap_set_all(&packet[3], SLOT_COUNT)) {
+        ui_ext_refresh();
       }
     } // else packet  type is 0x02 (music), which is handled above
     // Reset packet index for next frame
@@ -680,6 +758,7 @@ void setup() {
 
   keys_init(); // physical MX keys on CN1/P3
   tap_count = tap_count_load();
+  keymap_load(); // key gesture -> action map
   power_load(); // idle behaviour setting
   ui_ext_init(); // "More >" button + extra settings screen
   

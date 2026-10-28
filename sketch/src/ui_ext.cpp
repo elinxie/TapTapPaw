@@ -1,16 +1,18 @@
 #include "ui_ext.h"
+#include "keymap.h"
 #include "power.h"
 #include "ui/ui.h"
 #include <lvgl.h>
 
 static lv_obj_t *scr_ext = NULL;
 static lv_obj_t *dd_idle_after = NULL;
+static lv_obj_t *dd_keys[SLOT_COUNT] = {NULL};
 static const uint8_t IDLE_MINUTE_CHOICES[] = {1, 2, 5, 10, 30};
 
 static void style_label(lv_obj_t *l) { lv_obj_set_style_text_color(l, lv_color_white(), LV_PART_MAIN); }
 
 // one row: label on the left, dropdown on the right
-static lv_obj_t *add_row(lv_obj_t *parent, const char *text, const char *options, uint16_t selected, lv_event_cb_t cb) {
+static lv_obj_t *add_row(lv_obj_t *parent, const char *text, const char *options, uint16_t selected, lv_event_cb_t cb, void *user_data) {
   lv_obj_t *row = lv_obj_create(parent);
   lv_obj_remove_style_all(row);
   lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
@@ -23,7 +25,7 @@ static lv_obj_t *add_row(lv_obj_t *parent, const char *text, const char *options
   lv_dropdown_set_options(dd, options);
   lv_dropdown_set_selected(dd, selected);
   lv_obj_set_width(dd, 150);
-  lv_obj_add_event_cb(dd, cb, LV_EVENT_VALUE_CHANGED, NULL);
+  lv_obj_add_event_cb(dd, cb, LV_EVENT_VALUE_CHANGED, user_data);
   return dd;
 }
 
@@ -54,8 +56,41 @@ static void idle_after_cb(lv_event_t *e) {
   power_save();
 }
 
+static void key_slot_cb(lv_event_t *e) {
+  uintptr_t slot = (uintptr_t)lv_event_get_user_data(e);
+  uint16_t sel = lv_dropdown_get_selected(lv_event_get_target(e));
+  if (slot < SLOT_COUNT && sel < ACT_COUNT) {
+    key_map[slot] = (uint8_t)sel;
+    keymap_save();
+  }
+}
+
+void ui_ext_refresh() {
+  for (uint8_t i = 0; i < SLOT_COUNT; i++) {
+    if (dd_keys[i] != NULL) lv_dropdown_set_selected(dd_keys[i], key_map[i]);
+  }
+}
+
+static void keys_reset_cb(lv_event_t *e) {
+  keymap_defaults();
+  keymap_save();
+  ui_ext_refresh();
+}
+
 static void back_cb(lv_event_t *e) {
   lv_scr_load_anim(ui_Screen_setting, LV_SCR_LOAD_ANIM_MOVE_RIGHT, 300, 0, false);
+}
+
+static lv_obj_t *add_button(lv_obj_t *parent, const char *text, int w, lv_event_cb_t cb) {
+  lv_obj_t *btn = lv_btn_create(parent);
+  lv_obj_set_size(btn, w, 28);
+  lv_obj_set_style_bg_color(btn, lv_color_hex(0xFBC979), LV_PART_MAIN);
+  lv_obj_t *l = lv_label_create(btn);
+  lv_label_set_text(l, text);
+  lv_obj_set_style_text_color(l, lv_color_black(), LV_PART_MAIN);
+  lv_obj_center(l);
+  lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+  return btn;
 }
 
 static void build_ext_screen() {
@@ -68,27 +103,27 @@ static void build_ext_screen() {
   lv_obj_add_flag(scr_ext, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scroll_dir(scr_ext, LV_DIR_VER);
 
-  lv_obj_t *back = lv_btn_create(scr_ext);
-  lv_obj_set_size(back, 80, 28);
-  lv_obj_set_style_bg_color(back, lv_color_hex(0xFBC979), LV_PART_MAIN);
-  lv_obj_t *bl = lv_label_create(back);
-  lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
-  lv_obj_set_style_text_color(bl, lv_color_black(), LV_PART_MAIN);
-  lv_obj_center(bl);
-  lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
+  add_button(scr_ext, LV_SYMBOL_LEFT " Back", 80, back_cb);
 
   add_heading(scr_ext, "Idle (no app / web page connected)");
-  add_row(scr_ext, "When idle", "Never sleep\nDim only\nSleep display", idle_mode, idle_mode_cb);
+  add_row(scr_ext, "When idle", "Never sleep\nDim only\nSleep display", idle_mode, idle_mode_cb, NULL);
   uint16_t sel = 2;
   for (uint16_t i = 0; i < sizeof(IDLE_MINUTE_CHOICES); i++) {
     if (IDLE_MINUTE_CHOICES[i] == idle_minutes) sel = i;
   }
-  dd_idle_after = add_row(scr_ext, "After", "1 minute\n2 minutes\n5 minutes\n10 minutes\n30 minutes", sel, idle_after_cb);
+  dd_idle_after = add_row(scr_ext, "After", "1 minute\n2 minutes\n5 minutes\n10 minutes\n30 minutes", sel, idle_after_cb, NULL);
   refresh_idle_rows();
 
   lv_obj_t *hint = lv_label_create(scr_ext);
-  lv_label_set_text(hint, "Touch or press a key to wake.\nThe wake touch or press does not count as a tap.");
+  lv_label_set_text(hint, "Touch or press a key to wake.\nThe wake touch or press is not a tap.");
   lv_obj_set_style_text_color(hint, lv_color_hex(0xA99BB3), LV_PART_MAIN);
+
+  add_heading(scr_ext, "Keys (events always go to the app)");
+  static const char *slot_names[SLOT_COUNT] = {"Key1 tap", "Key1 hold", "Key2 tap", "Key2 hold", "Key1+Key2", "Key1+Key2 hold"};
+  for (uint8_t i = 0; i < SLOT_COUNT; i++) {
+    dd_keys[i] = add_row(scr_ext, slot_names[i], KEY_ACTION_OPTIONS, key_map[i], key_slot_cb, (void *)(uintptr_t)i);
+  }
+  add_button(scr_ext, "Reset keys", 110, keys_reset_cb);
 }
 
 static void more_cb(lv_event_t *e) {
