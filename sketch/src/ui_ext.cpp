@@ -2,9 +2,13 @@
 #include "keymap.h"
 #include "power.h"
 #include "ui/ui.h"
+#include "wifi_sync.h"
 #include <lvgl.h>
 
 static lv_obj_t *scr_ext = NULL;
+#if ENABLE_WIFI
+static lv_obj_t *lbl_wifi = NULL;
+#endif
 static lv_obj_t *dd_idle_after = NULL;
 static lv_obj_t *dd_keys[SLOT_COUNT] = {NULL};
 static const uint8_t IDLE_MINUTE_CHOICES[] = {1, 2, 5, 10, 30};
@@ -93,6 +97,22 @@ static lv_obj_t *add_button(lv_obj_t *parent, const char *text, int w, lv_event_
   return btn;
 }
 
+#if ENABLE_WIFI
+static void wifi_enable_cb(lv_event_t *e) {
+  wifi_sync_set_enabled(lv_dropdown_get_selected(lv_event_get_target(e)) == 1);
+}
+
+static void wifi_forget_cb(lv_event_t *e) {
+  wifi_sync_set_credentials("", "");
+}
+
+static void wifi_status_timer(lv_timer_t *t) {
+  if (lbl_wifi == NULL) return;
+  const char *s = wifi_sync_status();
+  if (strcmp(lv_label_get_text(lbl_wifi), s) != 0) lv_label_set_text(lbl_wifi, s); // only redraw on change
+}
+#endif
+
 static void build_ext_screen() {
   scr_ext = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(scr_ext, lv_color_hex(0x1B1620), LV_PART_MAIN);
@@ -117,6 +137,19 @@ static void build_ext_screen() {
   lv_obj_t *hint = lv_label_create(scr_ext);
   lv_label_set_text(hint, "Touch or press a key to wake.\nThe wake touch or press is not a tap.");
   lv_obj_set_style_text_color(hint, lv_color_hex(0xA99BB3), LV_PART_MAIN);
+
+#if ENABLE_WIFI
+  add_heading(scr_ext, "WiFi (when no app / web page is connected)");
+  add_row(scr_ext, "WiFi", "Off\nOn", wifi_sync_enabled() ? 1 : 0, wifi_enable_cb, NULL);
+  lbl_wifi = lv_label_create(scr_ext);
+  lv_label_set_text(lbl_wifi, wifi_sync_status());
+  lv_obj_set_style_text_color(lbl_wifi, lv_color_white(), LV_PART_MAIN);
+  lv_obj_t *wifi_hint = lv_label_create(scr_ext);
+  lv_label_set_text(wifi_hint, "Network name, password and location are\nsent from the web page over USB.");
+  lv_obj_set_style_text_color(wifi_hint, lv_color_hex(0xA99BB3), LV_PART_MAIN);
+  add_button(scr_ext, "Forget WiFi", 110, wifi_forget_cb);
+  lv_timer_create(wifi_status_timer, 1000, NULL);
+#endif
 
   add_heading(scr_ext, "Keys (events always go to the app)");
   static const char *slot_names[SLOT_COUNT] = {"Key1 tap", "Key1 hold", "Key2 tap", "Key2 hold", "Key1+Key2", "Key1+Key2 hold"};
