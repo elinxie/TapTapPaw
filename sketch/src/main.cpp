@@ -335,6 +335,29 @@ static void keys_housekeeping() {
   }
 }
 
+// ---- Data source indicator (top right of the music panel) --------------------------------
+//  USB symbol = TapTapPaw desktop app (default for any serial feed), "WEB" = web-sync page,
+//  WiFi symbol = ESP32 WiFi mode, warning symbol = nothing connected.
+// Source packet (host -> board): [0xFF] [0x07] [len=1] [src]   src: 1 desktop app, 2 web page
+// Hosts that never send it (the desktop app) stay on "USB app"; the web page sends it every second.
+enum DataSource : uint8_t { SRC_NONE = 0, SRC_USB_APP = 1, SRC_WEB = 2, SRC_WIFI = 3 };
+static uint8_t data_source = SRC_USB_APP;
+
+static void show_source() {
+  const char *txt = LV_SYMBOL_USB;
+  uint32_t color = 0x00FF00;
+  if (!app_connected) {
+    txt = LV_SYMBOL_WARNING;
+    color = 0xFFFF00;
+  } else if (data_source == SRC_WEB) {
+    txt = "WEB";
+  } else if (data_source == SRC_WIFI) {
+    txt = LV_SYMBOL_WIFI;
+  }
+  lv_obj_set_style_text_color(ui_main_Label_connection, lv_color_hex(color), LV_PART_MAIN);
+  lv_label_set_text(ui_main_Label_connection, txt);
+}
+
 //---- Serial packet format for system status:
 // Status: [0xFF] [0x01] [len] [evt] [cpu] [mem] [batt] [chg] [hr] [min] [sec] [media]
 // Music:  [0xFF] [0x02] [len] [title_len] [title...] [artist_len] [artist...]
@@ -384,6 +407,8 @@ void serial_parse(byte b) {
     } else if (packet[1] == 0x04) { // Settings Packet
       packetLength = packet[2] + 3;
     } else if (packet[1] == 0x06) { // Mood command
+      packetLength = packet[2] + 3;
+    } else if (packet[1] == 0x07) { // Source tag
       packetLength = packet[2] + 3;
     }
 
@@ -527,6 +552,13 @@ void serial_parse(byte b) {
     } else if (packet[1] == 0x06) {
       if (packet[2] >= 1 && packet[3] <= MOOD_SLEEPY) {
         set_mood(packet[3]);
+      }
+
+      // Source tag: [0xFF][0x07][len=1][src] 1 desktop app, 2 web page
+    } else if (packet[1] == 0x07) {
+      if (packet[2] >= 1 && (packet[3] == SRC_USB_APP || packet[3] == SRC_WEB) && packet[3] != data_source) {
+        data_source = packet[3];
+        show_source();
       }
     } // else packet  type is 0x02 (music), which is handled above
     // Reset packet index for next frame
@@ -697,8 +729,8 @@ void loop() {
         lv_timer_del(random_mouse_timer);
         random_mouse_timer = NULL;
       }
-      lv_obj_set_style_text_color(ui_main_Label_connection, lv_color_hex(0xFFFF00), LV_PART_MAIN);
-      lv_label_set_text(ui_main_Label_connection, LV_SYMBOL_WARNING);
+      data_source = SRC_USB_APP; // forget the old host; a reconnecting desktop app sends no tag
+      show_source(); // warning symbol: nothing connected
       lv_label_set_text(ui_main_Label_status, "[ Status ]");
       lv_label_set_text(ui_main_Label_title, "Youtube/Spotify/Music");
       lv_label_set_text(ui_main_Label_artist, "* Swipe down for setting *");
@@ -713,8 +745,7 @@ void loop() {
         tft.setBrightness(dim_brightness);
 
       led_color(1, 0, 1); // green on to serial connected
-      lv_obj_set_style_text_color(ui_main_Label_connection, lv_color_hex(0x00FF00), LV_PART_MAIN);
-      lv_label_set_text(ui_main_Label_connection, LV_SYMBOL_USB);
+      show_source();
       // beepbeep();
       playAudio("connect.wav");
     }
