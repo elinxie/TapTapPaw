@@ -70,6 +70,26 @@ class Board:
     def close(self):
         self.ser.close()
 
+    def hard_reset(self, boot_wait=3.5):
+        """Reboot the ESP32 through the RTS/DTR auto-reset circuit (like pressing EN)."""
+        self.ser.dtr = False
+        self.ser.rts = True
+        time.sleep(0.15)
+        self.ser.rts = False
+        time.sleep(boot_wait)
+        self.ser.reset_input_buffer()
+        self.buf = b""
+
+    def read_text(self, seconds):
+        """Collect serial output for a while (firmware log lines); ack frames stay in self.buf."""
+        end = time.time() + seconds
+        text = b""
+        while time.time() < end:
+            d = self.ser.read(512)
+            text += d
+            self.buf += d
+        return text.decode("latin-1")
+
     def send(self, data):
         self.ser.write(data)
         self.ser.flush()

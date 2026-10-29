@@ -102,18 +102,34 @@ def main():
     q = b.query()
     check("abort leaves no session and keeps the stored layout", a and a.status == 0 and not (q.flags & 4) and q.crc == zlib.crc32(big), q)
 
-    # 8 interrupted by pulling the connection: partial data, port closed and reopened (the board resets)
+    # 8 interrupted by closing the port (cable pulled / tab closed). The board keeps the partial upload open: the old layout is intact
+    # and a new connection can resume where it stopped.
     big2 = example.replace(b"Desk companion", b"Other   companion") + b" " * (CHUNK * 2)
+    n2 = (len(big2) + CHUNK - 1) // CHUNK
     b.call(begin_pkt(big2), 0x0B)
     b.call(chunk_pkt(big2, 0), 0x0C)
     b.close()
     time.sleep(1.0)
-    b = Board(args.port)
+    b = Board(args.port, boot_wait=1.0)
     q = b.query()
-    check("after an interrupted upload + reconnect the old layout is intact and no session is open",
-          q and q.crc == zlib.crc32(big) and not (q.flags & 4), q)
+    check("after closing the port mid-upload the stored layout is intact", q and q.crc == zlib.crc32(big), q)
+    a = b.call(begin_pkt(big2), 0x0B)
+    check("reconnect: BEGIN of the same layout resumes (seq 1) or restarts (seq 0)", a and a.status == 0 and a.seq in (0, 1), a)
+    for s_ in range(a.seq if a else 0, n2):
+        b.call(chunk_pkt(big2, s_), 0x0C)
+    a = b.call(pkt(0x0D), 0x0D)
+    q = b.query()
+    check("resumed-after-reconnect upload commits", a and a.status == 0 and q.crc == zlib.crc32(big2), (a, q))
+
+    # 8b power-loss style interruption: partial upload, then a real reboot (RTS reset). The partial file must not survive or corrupt anything.
+    b.call(begin_pkt(big), 0x0B)
+    b.call(chunk_pkt(big, 0), 0x0C)
+    b.hard_reset()
+    q = b.query()
+    check("after a reset mid-upload: stored layout intact, no session, partial file removed",
+          q and q.crc == zlib.crc32(big2) and not (q.flags & 4) and (q.flags & 1), q)
     ok, msg = full(b, example)
-    check("a clean upload works after the interruption", ok, msg)
+    check("a clean upload works after the reboot", ok, msg)
 
     # 9 garbage on the line does not break the parser
     b.send(bytes([0x00, 0x12, 0xFF, 0x0C, 0x02, 0x00]))  # truncated frame: the parser waits for its payload
@@ -124,6 +140,27 @@ def main():
     b.ser.reset_input_buffer()
     q = b.query()
     check("line noise / truncated frame: board still answers after a resync", q is not None or b.query() is not None)
+
+    # 11 every widget type on screen, cycling the pages (auto-rotate 3 s) while watching the heap in the firmware log
+    import json, re
+    lay = json.loads(example)
+    lay["pg"] = [p for p in lay["pg"] if not p.get("m")]  # custom pages only, so page 0 is built from widgets right away
+    lay["rot"] = 3
+    cyc = json.dumps(lay, separators=(",", ":")).encode()
+    ok, msg = full(b, cyc)
+    check("layout with only custom pages (auto-rotate 3 s) uploads", ok, msg)
+    log = b.read_text(40.0)
+    heaps = [(int(m.group(1)), int(m.group(2))) for m in re.finditer(r"layout page (\d+)/\d+ heap free (\d+)", log)]
+    pages = [h[0] for h in heaps]
+    check("auto-rotate visited every page at least twice (%d page changes seen)" % len(heaps), len(heaps) >= 8 and set(pages) == {1, 2}, pages)
+    if len(heaps) >= 8:
+        first = [h[1] for h in heaps[:2]]
+        last = [h[1] for h in heaps[-2:]]
+        print("heap free after first page changes: %s, after the last ones: %s" % (first, last))
+        check("heap does not leak across page changes (drop <= 2 KB)", min(first) - min(last) <= 2048, (first, last))
+        check("heap stays healthy (> 40 KB free)", min(h[1] for h in heaps) > 40000, min(h[1] for h in heaps))
+    q = b.query()
+    check("board alive after cycling pages", q is not None and (q.flags & 1), q)
 
     # 10 reset
     a = b.reset_layout()

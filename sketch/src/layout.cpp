@@ -572,6 +572,7 @@ static void goto_page(uint8_t idx, lv_scr_load_anim_t anim) {
   last_nav_ms = millis();
   set_dots(dots_main, cur);
   lv_scr_load_anim(t, anim, anim == LV_SCR_LOAD_ANIM_NONE ? 0 : 300, 0, false);
+  log_i("layout page %u/%u heap free %u largest %u", (unsigned)cur + 1, (unsigned)L.npages, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
   if (old != t && (old == scr_c[0] || old == scr_c[1])) lv_timer_set_repeat_count(lv_timer_create(clean_later_cb, 800, old), 1);
 }
 
@@ -710,6 +711,7 @@ void layout_begin(bool boot_held) {
     crashes++;
     lp.putUChar("crash", crashes);
   }
+  if (LittleFS.exists(TMP_PATH)) LittleFS.remove(TMP_PATH); // leftover of an upload that was cut by a reset or power loss
   bool stored = file_exists();
   if (stored && stored_crc_cache == 0) stored_crc_cache = 0xFFFFFFFFu; // a layout file with unknown crc (should not happen)
   const char *note = NULL;
@@ -782,6 +784,7 @@ void layout_poll() {
   activate();
   lv_obj_t *t = prepare_page(0);
   lv_scr_load_anim(t, LV_SCR_LOAD_ANIM_FADE_ON, 300, 0, false);
+  log_i("layout applied: %u pages, %u widgets, heap free %u largest %u", (unsigned)L.npages, (unsigned)L.nwidgets, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 }
 
 bool layout_active() { return active; }
