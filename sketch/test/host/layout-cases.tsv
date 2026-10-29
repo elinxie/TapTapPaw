@@ -111,3 +111,8 @@ ok	{"v":1,"pg":[{"bg":{"t":"i","i":3}}]}
 value out of range	{"v":1,"pg":[{"bg":{"t":"i"}}]}
 value out of range	{"v":1,"pg":[{"bg":{"t":"b","i":7}}]}
 ok	{"v":1,"pg":[{"bg":{"t":"b","i":5}}]}
+ok	{"v":1,"pg":[{"w":[{"t":"pt","x":40,"y":100,"w":160,"h":132,"n":17}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"pt","x":0,"y":0,"w":160,"h":132}]}]}
+widget outside the 240x320 screen	{"v":1,"pg":[{"w":[{"t":"pt","x":0,"y":0,"w":150,"h":132}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"pt","x":0,"y":0,"w":160,"h":132,"n":32}]}]}
+syntax error	{"v":1,"pg":[{"w":[{"t":"pt","x":0,"y":0,"w":160,"h":132,"n":"cat"}]}]}

@@ -54,7 +54,8 @@ static void test_crc() {
 }
 
 static void test_parse_good() {
-  Layout *L = new Layout;
+  static Layout LL; // static: avoids a leak report, Layout is large for the stack
+  Layout *L = &LL;
   Err e = parse(GOOD, strlen(GOOD), *L);
   CHECK(e == E_OK);
   CHECK(L->npages == 4);
@@ -78,7 +79,7 @@ static void test_parse_good() {
 }
 
 static void test_parse_bad() {
-  CHECK(parse(nullptr, 0, *new Layout) == E_EMPTY);
+  { Layout *L = new Layout; CHECK(parse(nullptr, 0, *L) == E_EMPTY); delete L; }
   CHECK(P("") == E_EMPTY);
   CHECK(P(std::string(MAX_LAYOUT_BYTES + 1, ' ')) == E_TOO_BIG);
   CHECK(P("not json") == E_SYNTAX);

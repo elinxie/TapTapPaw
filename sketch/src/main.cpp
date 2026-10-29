@@ -20,6 +20,7 @@ const String version = String(firmware_version) + " | " __DATE__ "-" __TIME__;
 #include "animation.h"
 #include "keymap.h"
 #include "layout.h"
+#include "pets/pets.h"
 void ble_keys_begin(); // ble_keys.cpp
 #include "power.h"
 #include "ui/ui.h"
@@ -239,6 +240,7 @@ static void paw_tap(bool flush_serial) {
   lv_obj_clear_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
   layout_sync_cat(); // a typing cat widget on a custom page shows the same paw
+  pets_busy(); // ASCII pets type along
   if (!flush_serial) {
     lv_task_handler(); // draw the "up" frame before the delay (serial path redraws while flushing)
   }
@@ -844,6 +846,7 @@ void setup() {
   power_load(); // idle behaviour setting
   ui_ext_init(); // "More >" button + extra settings screen
   layout_begin(boot_held_at_power_up); // custom widget layout from LittleFS, with safe mode (layout.cpp)
+  pet_init(); // tap the cat to pet it; waiting style setting
   wifi_sync_begin(); // WiFi mode task (no-op in the normal build)
   ble_keys_begin(); // Bluetooth keyboard (esp32dev_ble build only, else a no-op)
   
@@ -870,7 +873,8 @@ void loop() {
   lv_task_handler();
   layout_poll(); // apply a layout that was just uploaded
   autoDim(); // handle auto dimming based on ambient light
-  sleepy_animation(); // handle sleepy animation
+  sleepy_animation(); // handle sleepy animation (or cheerful play while waiting)
+  pet_poll(); // a tap on the cat
   eye_blink_animation(); // handle eye blinking animation
 
   // up to 256 bytes per pass (was 1): picture uploads move 64 KB, one byte per loop pass made that crawl

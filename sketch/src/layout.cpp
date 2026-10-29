@@ -3,6 +3,7 @@
 #include "accessory.h"
 #include "animation.h"
 #include "keymap.h"
+#include "pets/pets.h"
 #include "layout_core.h"
 #include "ui/ui.h"
 #include <LittleFS.h>
@@ -238,7 +239,8 @@ class FsStorage : public lc::Storage {
   }
   uint8_t state_flags() override {
     return (uint8_t)((active ? lc::FL_LAYOUT_ACTIVE : 0) | (safe_reason ? lc::FL_SAFE_MODE : 0) | (file_exists() ? lc::FL_LAYOUT_STORED : 0) |
-                     (ble_keys_available() ? lc::FL_BLE_KEYS : 0) | (ble_keys_connected() ? lc::FL_BLE_PAIRED : 0));
+                     (ble_keys_available() ? lc::FL_BLE_KEYS : 0) | (ble_keys_connected() ? lc::FL_BLE_PAIRED : 0) |
+                     (pets_all() ? lc::FL_PETS_ALL : 0));
   }
   uint32_t picture_crc(uint8_t slot) override {
     if (!pic_exists(slot)) return 0;
@@ -612,6 +614,7 @@ static void build_widget(lv_obj_t *p, const Widget &w, RT &r) {
       r.a = im;
       break;
     }
+    case lc::W_PET: r.a = pet_create(p, w.x, w.y, w.n); break;
     case lc::W_TCAT: { // the original screen's typing cat, same parts and offsets; layout_sync_cat() mirrors their state
       lv_obj_t *o = lv_obj_create(p);
       lv_obj_remove_style_all(o);
@@ -628,6 +631,7 @@ static void build_widget(lv_obj_t *p, const Widget &w, RT &r) {
                                     {&ui_img_rightpawup_png, -55, 4, true}, {&ui_img_sleepy_png, 10, -1, true}, {&ui_img_closeeye_png, 11, -11, true}};
       for (const Part &pt : parts) {
         lv_obj_t *im = lv_img_create(o);
+        lv_obj_clear_flag(im, LV_OBJ_FLAG_CLICKABLE); // taps go to the cat (petting)
         lv_img_set_src(im, pt.img);
         lv_obj_align(im, LV_ALIGN_CENTER, pt.x, pt.y);
         if (pt.hidden) lv_obj_add_flag(im, LV_OBJ_FLAG_HIDDEN);
@@ -740,7 +744,7 @@ static lv_obj_t *prepare_page(uint8_t idx) {
     if (!root) continue;
     void *ud = (void *)(uintptr_t)i;
     switch (w.type) { // tappable widgets
-      case lc::W_BUTTON: case lc::W_POMO: case lc::W_STOPWATCH: case lc::W_FOCUS: case lc::W_REMIND:
+      case lc::W_BUTTON: case lc::W_POMO: case lc::W_STOPWATCH: case lc::W_FOCUS: case lc::W_REMIND: case lc::W_TCAT: case lc::W_MOOD: case lc::W_PET:
         lv_obj_add_flag(root, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(root, widget_cb, LV_EVENT_SHORT_CLICKED, ud);
         lv_obj_add_event_cb(root, widget_cb, LV_EVENT_LONG_PRESSED, ud);
@@ -939,6 +943,7 @@ static void timers_cb(lv_timer_t *) {
       POMO.total_ms = (uint32_t)pw->b * 60000UL;
       POMO.end_ms = now + POMO.total_ms;
       set_mood(MOOD_HAPPY);
+      pets_event(PET_CELEBRATE, 6000);
       ui_toast("Break time!", 4000);
     } else { // break done: wait for the next tap
       pomo_reset();
@@ -952,6 +957,7 @@ static void timers_cb(lv_timer_t *) {
     remind_shown[i] = now;
     ui_toast(REMIND_TEXT[w.k < 3 ? w.k : 0], 6000);
     set_mood(MOOD_HAPPY);
+    pets_event(PET_ATTENTION, 6000);
     beepbeep();
   }
 }
@@ -974,6 +980,8 @@ static void widget_cb(lv_event_t *ev) {
     case lc::W_POMO: if (tap) queue_action(lc::BA_POMO_TOGGLE, 0); else if (hold) queue_action(lc::BA_POMO_RESET, 0); break;
     case lc::W_STOPWATCH: if (tap) queue_action(lc::BA_SW_TOGGLE, 0); else if (hold) queue_action(lc::BA_SW_RESET, 0); break;
     case lc::W_FOCUS: if (tap) queue_action(lc::BA_FOCUS_TOGGLE, 0); break;
+    case lc::W_TCAT: case lc::W_MOOD: if (tap) pet_request(); break;
+    case lc::W_PET: if (tap) { pets_petted(); clickSound(); } break;
     case lc::W_REMIND: if (tap) { uint8_t idx = pg.first + i; remind_next[idx] = millis() + (uint32_t)w.p * 60000UL; remind_shown[idx] = 0; clickSound(); } break;
     default: break;
   }
@@ -1022,6 +1030,77 @@ static void run_action(uint8_t e, uint16_t g) {
 }
 
 static void tick_cb(lv_timer_t *) { update_widgets(); }
+
+// A heart that floats up from the cat and fades. Drawn from the heart curve (x^2 + y^2 - 1)^3 = x^2 y^3, no image asset.
+static uint8_t heart_px[22 * 20];
+static lv_img_dsc_t heart_dsc;
+static void heart_build() {
+  if (heart_dsc.data) return;
+  const int W = 22, H = 20;
+  for (int j = 0; j < H; j++)
+    for (int i = 0; i < W; i++) {
+      int in = 0; // 4x4 supersampling for soft edges
+      for (int sj = 0; sj < 4; sj++)
+        for (int si = 0; si < 4; si++) {
+          float x = ((i + (si + 0.5f) / 4) / W - 0.5f) * 2.6f, y = (0.5f - (j + (sj + 0.5f) / 4) / H) * 2.6f + 0.15f;
+          float a = x * x + y * y - 1;
+          if (a * a * a - x * x * y * y * y <= 0) in++;
+        }
+      heart_px[j * W + i] = (uint8_t)(in * 255 / 16);
+    }
+  heart_dsc.header.cf = LV_IMG_CF_ALPHA_8BIT;
+  heart_dsc.header.w = W;
+  heart_dsc.header.h = H;
+  heart_dsc.data_size = sizeof heart_px;
+  heart_dsc.data = heart_px;
+}
+static void heart_y_cb(void *o, int32_t v) { lv_obj_set_y((lv_obj_t *)o, (lv_coord_t)v); }
+static void heart_opa_cb(void *o, int32_t v) { lv_obj_set_style_img_opa((lv_obj_t *)o, (lv_opa_t)v, 0); }
+static void heart_done_cb(lv_anim_t *a) { lv_obj_del((lv_obj_t *)a->var); }
+void cat_heart() {
+  lv_obj_t *scr = lv_scr_act();
+  lv_coord_t x, y;
+  if (scr == ui_Screen_main) {
+    lv_area_t a;
+    lv_obj_get_coords(ui_main_Container_cat, &a);
+    x = a.x1 + 132;
+    y = a.y1 + 6;
+  } else if (active && !L.pages[cur].is_main && (scr == scr_c[0] || scr == scr_c[1])) {
+    const lc::Page &pg = L.pages[cur];
+    const Widget *cw = NULL;
+    for (uint8_t i = 0; i < pg.nw && !cw; i++)
+      if (L.widgets[pg.first + i].type == lc::W_TCAT || L.widgets[pg.first + i].type == lc::W_MOOD) cw = &L.widgets[pg.first + i];
+    if (!cw) return;
+    x = cw->x + (cw->type == lc::W_TCAT ? 132 : 112);
+    y = cw->y + 6;
+  } else {
+    return; // settings screens: no hearts
+  }
+  heart_build();
+  lv_obj_t *h = lv_img_create(lv_layer_top());
+  lv_img_set_src(h, &heart_dsc);
+  lv_obj_set_style_img_recolor(h, lv_color_hex(0xFF6B9A), 0);
+  lv_obj_set_style_img_recolor_opa(h, LV_OPA_COVER, 0);
+  lv_obj_set_pos(h, x + (lv_coord_t)(esp_random() % 24) - 12, y);
+  lv_obj_clear_flag(h, LV_OBJ_FLAG_CLICKABLE);
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, h);
+  lv_anim_set_time(&a, 1100);
+  lv_anim_set_values(&a, y, y - 44);
+  lv_anim_set_exec_cb(&a, heart_y_cb);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_set_ready_cb(&a, heart_done_cb);
+  lv_anim_start(&a);
+  lv_anim_t b;
+  lv_anim_init(&b);
+  lv_anim_set_var(&b, h);
+  lv_anim_set_time(&b, 1100);
+  lv_anim_set_values(&b, 255, 0);
+  lv_anim_set_exec_cb(&b, heart_opa_cb);
+  lv_anim_set_path_cb(&b, lv_anim_path_ease_in);
+  lv_anim_start(&b);
+}
 
 // Typing cat widgets copy the state of the original screen's cat (which main.cpp and animation.cpp keep animating
 // whether or not that screen is shown): paw up/down, eyes shut, asleep, mouse paw position.
@@ -1195,6 +1274,7 @@ static void activate() {
     lv_timer_create(cat_cb, 30, NULL); // blink (200 ms) and mouse paw need a quicker copy than the other widgets
     lv_timer_create(rotate_cb, 1000, NULL);
     lv_timer_create(timers_cb, 250, NULL); // pomodoro and reminders keep running on any page
+    lv_timer_create([](lv_timer_t *) { pets_tick(); }, 200, NULL); // ASCII pets animate at 5 frames a second
   }
   for (uint8_t i = 0; i < L.nwidgets; i++) { // reminders count from now
     remind_next[i] = millis() + (uint32_t)L.widgets[i].p * 60000UL;

@@ -10,3 +10,6 @@
 **/obj
 /build
 /.codex-dotnet-home
+
+__pycache__/
+taptappaw-changes.patch

@@ -1,0 +1,5 @@
+Source: https://github.com/anthropics/claude-desktop-buddy (MIT, see LICENSE-claude-desktop-buddy.txt)
+Commit: a280c6421931431ba6905aee9d2b50b2bfd8c103 (2026-04-16)
+Copied: species/*.cpp (the 18 code-drawn ASCII species) and the Species interface (buddy.h, buddy_common.h).
+Changes: the M5StickC include and the extern sprite line in each species file are replaced by comments; drawing goes through
+the LovyanGFX shim in pets.cpp. The GIF character art in that repository (Bufo) is excluded from its license and is not used.

@@ -26,6 +26,7 @@ enum WType : uint8_t {
   W_NONE = 0, W_ANALOG, W_DIGITAL, W_WEATHER, W_NOWPLAY, W_SYSBARS, W_TAPS, W_LABEL, W_MOOD, W_SHAPE, W_SLIDER,
   // feature level 2
   W_TCAT, W_POMO, W_COUNTDOWN, W_STOPWATCH, W_DATE, W_FOCUS, W_BUTTON, W_SPOTIFY, W_ALBUM, W_REMIND, W_PICTURE,
+  W_PET, // ASCII pet (src/pets), fixed 160x132, species in "n"
   W_COUNT
 };
 // What this firmware understands; reported in the QUERY ack's detail byte (older firmware answers 0).
@@ -63,6 +64,7 @@ struct Widget {
   uint8_t e; // button action (BtnAction)
   uint16_t g; // button action argument
   uint8_t i; // picture slot
+  uint8_t n; // pet species
 };
 
 struct Page {
@@ -139,7 +141,7 @@ enum Status : uint8_t {
   ST_INCOMPLETE = 10
 };
 
-enum Flags : uint8_t { FL_LAYOUT_ACTIVE = 1, FL_SAFE_MODE = 2, FL_SESSION_OPEN = 4, FL_LAYOUT_STORED = 8, FL_BLE_KEYS = 16, FL_BLE_PAIRED = 32 };
+enum Flags : uint8_t { FL_LAYOUT_ACTIVE = 1, FL_SAFE_MODE = 2, FL_SESSION_OPEN = 4, FL_LAYOUT_STORED = 8, FL_BLE_KEYS = 16, FL_BLE_PAIRED = 32, FL_PETS_ALL = 64 };
 
 constexpr size_t ACK_FRAME_BYTES = 3 + 12;
 

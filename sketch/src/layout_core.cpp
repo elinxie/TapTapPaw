@@ -184,7 +184,7 @@ Err int_in(P &p, int32_t lo, int32_t hi, int32_t &v) {
 }
 
 WType wtype_from(const char *s, size_t l) {
-  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl", "ct", "pm", "cd", "sw", "dt", "fs", "bt", "sp", "aa", "rm", "pc"};
+  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl", "ct", "pm", "cd", "sw", "dt", "fs", "bt", "sp", "aa", "rm", "pc", "pt"};
   for (uint8_t i = 1; i < W_COUNT; i++)
     if (key_is(s, l, names[i])) return (WType)i;
   return W_NONE;
@@ -232,6 +232,7 @@ Err parse_widget(P &p, Layout &L) {
       else if (key_is(key, kl, "e")) { e = int_in(p, 0, 63, v); w.e = (uint8_t)v; he = true; }
       else if (key_is(key, kl, "g")) { e = int_in(p, 0, 65535, v); w.g = (uint16_t)v; }
       else if (key_is(key, kl, "i")) { e = int_in(p, 0, PICTURE_SLOTS - 1, v); w.i = (uint8_t)v; hi = true; }
+      else if (key_is(key, kl, "n")) { e = int_in(p, 0, 31, v); w.n = (uint8_t)v; }
       else if (key_is(key, kl, "s")) {
         e = read_str(p, text, sizeof text, tl);
         if (!e && tl > MAX_TEXT_LEN) e = E_TEXT;
@@ -250,6 +251,7 @@ Err parse_widget(P &p, Layout &L) {
   switch (w.type) { // per-type rules for the feature level 2 widgets
     case W_TCAT: if (w.w != 240 || w.h != 132) return E_GEOMETRY; break; // drawn at its fixed size
     case W_ALBUM: if (w.w != 96 || w.h != 96) return E_GEOMETRY; break;
+    case W_PET: if (w.w != 160 || w.h != 132) return E_GEOMETRY; break;
     case W_POMO:
       if (!hp) w.p = 25;
       if (!w.b) w.b = 5;

@@ -55,6 +55,10 @@ The **Widget builder** section designs the board's home screen: pages of widgets
 **Send to board** (see `WIDGETS.md`). It sends nothing until you press Send, Check or Reset, and the existing packets are unchanged.
 It needs firmware with the layout engine; older firmware does not answer and the page says so.
 
+While connected the page also sends the date every minute (packet `0x12`, for the Date widget), sends album art when the Spotify track
+changes, and acts on Spotify buttons tapped on the board (packet `0x13`; needs the `user-modify-playback-state` scope, so sign in to
+Spotify again once, and Spotify Premium).
+
 `node web-sync/test-layout.mjs` and `node web-sync/test-editor.mjs` test the layout code and the editor model.
 
 ### What a browser page cannot do
@@ -65,7 +69,7 @@ It needs firmware with the layout engine; older firmware does not answer and the
 | CPU and memory bars | The browser does not expose them. The page sends 0, so those bars stay empty. |
 | Now-playing from anything but Spotify | The Media Session API only covers audio the page plays itself. Spotify works through its Web API (above); everything else is typed in. |
 | Battery | Only where Chrome offers the Battery API; otherwise the page sends 0. |
-| Turning the board's keys into computer keystrokes | The ESP32 has no USB-HID, and a page cannot inject keystrokes anyway. |
+| Turning the board's keys into computer keystrokes over USB | The ESP32 has no USB-HID, and a page cannot inject keystrokes. The `esp32dev_ble` build sends them over Bluetooth instead (see `WIDGETS.md`). |
 | Keeping going with the tab closed or the computer asleep | The 1 Hz timer runs in a Web Worker so a background tab is not throttled, but closing the tab stops it. |
 
 ## Option B: ESP32 WiFi mode (opt-in build)

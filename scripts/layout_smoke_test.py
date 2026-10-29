@@ -248,6 +248,33 @@ def main():
     q = b.query()
     check("board alive after the picture tests", q is not None and (q.flags & 1), q)
 
+    # 15 cheerful waiting: after 60 s without activity the cat plays (wave, hearts, mouse) instead of sleeping. Runs for ~30 s here.
+    ok, msg = full(b, cat)
+    check("typing cat layout for the waiting test", ok, msg)
+    log = b.read_text(92.0)
+    check("cheerful waiting ran 30 s without a crash", "Guru Meditation" not in log and "rst:" not in log and "abort()" not in log, log[-300:])
+    q = b.query()
+    check("board alive after the waiting test", q is not None and (q.flags & 1), q)
+
+    # 16 pets (claude-desktop-buddy species): one per page, the second a species the standard build does not carry (falls back to
+    # the cat); the third page asks for two pets (41 KB of heap each) to show a failed allocation is skipped, not a crash
+    q = b.query()
+    print("    firmware carries all 18 pets: %s" % bool(q and q.flags & 64))
+    pets = (b'{"v":1,"rot":3,"pg":[{"w":[{"t":"pt","x":40,"y":40,"w":160,"h":132,"n":4},{"t":"tx","x":0,"y":200,"w":240,"h":20,"a":1,"s":"cat"}]},'
+            b'{"bg":{"t":"s","c":"#1b1620"},"w":[{"t":"pt","x":40,"y":120,"w":160,"h":132,"n":5}]},'
+            b'{"w":[{"t":"pt","x":40,"y":0,"w":160,"h":132,"n":12},{"t":"pt","x":40,"y":160,"w":160,"h":132,"n":15}]}]}')
+    ok, msg = full(b, pets)
+    check("pet layout uploads (%d bytes)" % len(pets), ok, msg)
+    log = b.read_text(24.0)
+    heaps = [int(m.group(2)) for m in re.finditer(r"layout page (\d+)/\d+ heap free (\d+)", log)]
+    check("pets: pages cycled (%d changes)" % len(heaps), len(heaps) >= 4, heaps)
+    if len(heaps) >= 4:
+        drift = min(heaps[:3]) - min(heaps[-3:])
+        check("pets: heap flat across page changes (worst drift %d B)" % drift, drift <= 2048, heaps)
+    check("pets: no crash", "Guru Meditation" not in log and "abort()" not in log and "rst:" not in log, log[-400:])
+    q = b.query()
+    check("board alive after the pets ran", q is not None and (q.flags & 1), q)
+
     # 10 reset
     a = b.reset_layout()
     q = b.query()
