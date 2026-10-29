@@ -49,9 +49,13 @@ git -C /tmp/ttp-pages commit -am "Update web-sync page" && git -C /tmp/ttp-pages
 git worktree remove /tmp/ttp-pages
 ```
 
-### Layout upload (packets `0x0B`-`0x11`)
+### Widget builder (packets `0x0B`-`0x11`)
 
-The page code also contains the layout validator and upload driver for the widget builder (see `WIDGETS.md`). They send no packets until a layout is uploaded, and the existing packets are unchanged.
+The **Widget builder** section designs the board's home screen: pages of widgets, backgrounds, templates, export/import, and
+**Send to board** (see `WIDGETS.md`). It sends nothing until you press Send, Check or Reset, and the existing packets are unchanged.
+It needs firmware with the layout engine; older firmware does not answer and the page says so.
+
+`node web-sync/test-layout.mjs` and `node web-sync/test-editor.mjs` test the layout code and the editor model.
 
 ### What a browser page cannot do
 
