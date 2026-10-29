@@ -10,6 +10,8 @@ const { LAYOUT, WIDGET_DEFS, TEMPLATES, createEditor, validateLayout } = lib;
 const TYPES = Object.keys(WIDGET_DEFS);
 const ids = (ed, pi = 0) => ed.state.pages[pi].w.map((w) => w.id);
 
+assert.equal(LAYOUT.W, 240); assert.equal(LAYOUT.H, 320); // the board is portrait
+
 // every template is a valid layout and survives load -> export unchanged in meaning
 for (const t of TEMPLATES) {
   const text = JSON.stringify(t.layout);
@@ -35,7 +37,7 @@ for (const t of TEMPLATES) {
   assert.ok(out.size < 1000, 'ten default widgets are small: ' + out.size);
   for (const w of ed.state.pages[0].w) {
     const d = WIDGET_DEFS[w.t];
-    assert.ok(w.x >= 0 && w.y >= 0 && w.x + w.w <= 320 && w.y + w.h <= 240, w.t + ' inside the screen');
+    assert.ok(w.x >= 0 && w.y >= 0 && w.x + w.w <= LAYOUT.W && w.y + w.h <= LAYOUT.H, w.t + ' inside the screen');
     assert.equal(w.w, d.w); assert.equal(w.h, d.h);
   }
   assert.equal(JSON.parse(out.text).pg[0].w.find((w) => w.t === 'tx').s, 'Text');
@@ -49,9 +51,9 @@ for (const t of TEMPLATES) {
   let w = ed.find(a).w;
   assert.deepEqual([w.x, w.y, w.w, w.h], [12, 12, 100, 32], 'snapped to the 4 px grid');
   ed.setGeom(a, { x: -50, y: 999 });
-  w = ed.find(a).w; assert.deepEqual([w.x, w.y], [0, 240 - w.h], 'clamped to the screen');
+  w = ed.find(a).w; assert.deepEqual([w.x, w.y], [0, LAYOUT.H - w.h], 'clamped to the screen');
   ed.setGeom(a, { x: 300, w: 200 });
-  w = ed.find(a).w; assert.ok(w.x + w.w <= 320 && w.w === 200 && w.x === 120, 'width kept, x pulled back inside');
+  w = ed.find(a).w; assert.ok(w.x + w.w <= LAYOUT.W && w.w === 200 && w.x === LAYOUT.W - 200, 'width kept, x pulled back inside');
   ed.setGeom(a, { w: 1, h: 1 });
   w = ed.find(a).w; assert.ok(w.w >= 4 && w.h >= 2, 'minimum size');
   ed.setGeom(a, { x: 13.4, y: 7 }, { noSnap: true });
@@ -85,7 +87,7 @@ for (const t of TEMPLATES) {
   assert.equal(r.ok, true);
   const orig = ed.find(a).w, copy = ed.find(r.id).w;
   assert.notEqual(copy.id, orig.id); assert.equal(copy.s, 'Hello'); assert.equal(copy.c, '#ff0000');
-  assert.equal(copy.x, Math.min(orig.x + 8, 320 - copy.w)); assert.equal(ed.state.pages[0].w[1].id, r.id, 'copy sits right above the original');
+  assert.equal(copy.x, Math.min(orig.x + 8, LAYOUT.W - copy.w)); assert.equal(ed.state.pages[0].w[1].id, r.id, 'copy sits right above the original');
   copy.s = 'changed'; assert.equal(ed.find(a).w.s, 'Hello', 'the copy is independent');
   assert.equal(ed.remove(r.id), true); assert.equal(ed.find(r.id), null); assert.equal(ed.remove(r.id), false);
 }
@@ -160,10 +162,10 @@ for (const t of TEMPLATES) {
   assert.equal(ed.canUndo(), false); assert.equal(ed.undo(), false); assert.equal(ed.redo(), false);
   const a = ed.addWidget(0, 'dc').id;
   const x0 = ed.find(a).w.x;
-  ed.begin(); ed.setGeom(a, { x: 40 }); ed.setGeom(a, { x: 80 }); ed.setGeom(a, { x: 120 }); ed.end();
-  assert.equal(ed.find(a).w.x, 120);
+  ed.begin(); ed.setGeom(a, { x: 20 }); ed.setGeom(a, { x: 40 }); ed.setGeom(a, { x: 60 }); ed.end();
+  assert.equal(ed.find(a).w.x, 60);
   ed.undo(); assert.equal(ed.find(a).w.x, x0, 'the whole drag is undone in one step');
-  ed.redo(); assert.equal(ed.find(a).w.x, 120);
+  ed.redo(); assert.equal(ed.find(a).w.x, 60);
   ed.undo(); assert.equal(ed.canRedo(), true);
   ed.addWidget(0, 'tc'); assert.equal(ed.canRedo(), false, 'a new edit clears redo');
   ed.undo(); ed.undo(); assert.equal(ed.state.pages[0].w.length, 0, 'back to the empty page');

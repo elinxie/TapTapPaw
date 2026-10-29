@@ -573,34 +573,35 @@ function createEditor(initial) {
 }
 
 // ---- templates: complete layouts, validated by the tests ----
-const TEMPLATES = [
+const TEMPLATES = [ // portrait 240x320, like the board
   { name: 'Blank', layout: { v: 1, pg: [{}] } },
   { name: 'Original screen', layout: { v: 1, pg: [{ m: 1 }] } },
   { name: 'Clock and weather', layout: { v: 1, pg: [{ w: [
-    { t: 'dc', x: 16, y: 20, w: 200, h: 40, f: 1, z: 1, c: '#fbc979' },
-    { t: 'tx', x: 16, y: 64, w: 200, h: 20, s: 'Desk companion', c: '#a99bb3' },
-    { t: 'wx', x: 232, y: 12, w: 80, h: 100 },
-    { t: 'mc', x: 60, y: 104, w: 200, h: 132 },
+    { t: 'dc', x: 16, y: 16, w: 208, h: 40, f: 1, z: 1, a: 1, c: '#fbc979' },
+    { t: 'tx', x: 16, y: 60, w: 208, h: 20, s: 'Desk companion', a: 1, c: '#a99bb3' },
+    { t: 'wx', x: 82, y: 84, w: 76, h: 96 },
+    { t: 'mc', x: 20, y: 180, w: 200, h: 132 },
   ] }] } },
   { name: 'Music desk', layout: { v: 1, pg: [{ bg: { t: 'g', c: '#1b1620', d: '#3a2a55' }, w: [
-    { t: 'np', x: 8, y: 12, w: 304, h: 84 },
-    { t: 'dc', x: 8, y: 108, w: 150, h: 28, f: 1, z: 1 },
-    { t: 'sb', x: 8, y: 150, w: 200, h: 54 },
-    { t: 'tc', x: 216, y: 150, w: 96, h: 20, a: 2 },
-    { t: 'sl', x: 8, y: 214, w: 140, h: 16, k: 1 },
+    { t: 'np', x: 8, y: 16, w: 224, h: 84 },
+    { t: 'dc', x: 8, y: 112, w: 150, h: 28, f: 1, z: 1 },
+    { t: 'sb', x: 8, y: 152, w: 224, h: 60 },
+    { t: 'tc', x: 8, y: 224, w: 224, h: 20, a: 1 },
+    { t: 'sl', x: 20, y: 256, w: 200, h: 16 },
+    { t: 'sl', x: 20, y: 284, w: 200, h: 16, k: 1 },
   ] }] } },
   { name: 'Original + dashboard', layout: { v: 1, pg: [{ m: 1 }, { bg: { t: 'b', i: 5 }, w: [
-    { t: 'ac', x: 115, y: 14, w: 90, h: 90 },
-    { t: 'wx', x: 12, y: 14, w: 80, h: 100 },
-    { t: 'sb', x: 228, y: 14, w: 84, h: 90 },
-    { t: 'np', x: 8, y: 124, w: 304, h: 64 },
-    { t: 'sl', x: 12, y: 208, w: 130, h: 16, k: 0 },
-    { t: 'sl', x: 178, y: 208, w: 130, h: 16, k: 1 },
+    { t: 'ac', x: 75, y: 12, w: 90, h: 90 },
+    { t: 'wx', x: 8, y: 110, w: 76, h: 96 },
+    { t: 'sb', x: 92, y: 110, w: 140, h: 96 },
+    { t: 'np', x: 8, y: 214, w: 224, h: 56 },
+    { t: 'sl', x: 8, y: 282, w: 108, h: 16 },
+    { t: 'sl', x: 124, y: 282, w: 108, h: 16, k: 1 },
   ] }] } },
   { name: 'Three-page tour', layout: { v: 1, rot: 8, pg: [
-    { w: [{ t: 'dc', x: 40, y: 90, w: 240, h: 40, f: 1, z: 1, a: 1 }] },
-    { bg: { t: 'g', c: '#102030', d: '#3050a0' }, w: [{ t: 'wx', x: 120, y: 60, w: 80, h: 100 }] },
-    { bg: { t: 's', c: '#000000' }, w: [{ t: 'mc', x: 60, y: 54, w: 200, h: 132 }] },
+    { w: [{ t: 'dc', x: 20, y: 140, w: 200, h: 40, f: 1, z: 1, a: 1 }] },
+    { bg: { t: 'g', c: '#102030', d: '#3050a0' }, w: [{ t: 'wx', x: 82, y: 112, w: 76, h: 96 }] },
+    { bg: { t: 's', c: '#000000' }, w: [{ t: 'mc', x: 20, y: 94, w: 200, h: 132 }] },
   ] } },
 ];
 
