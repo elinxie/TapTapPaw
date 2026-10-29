@@ -56,7 +56,7 @@ widget must lie fully inside the screen: 240 wide x 320 tall, portrait like the 
 |-----|--------|---------|-------|
 | `ac` | analog clock | | fixed 90x90 (the same clock as the main screen) |
 | `dc` | digital clock | `f` 1 = 24 h, `q` 1 = show seconds, `z` size 0/1, `a` align 0/1/2, `c` color | 12 h shows AM/PM |
-| `wx` | weather | `k` 0 follow the device C/F setting, 1 = C, 2 = F; `c` text color | icon, temperature, humidity, observation time |
+| `wx` | weather | `k` 0 follow the device C/F setting, 1 = C, 2 = F; `c` text and icon color (white) | icon, temperature, humidity, observation time |
 | `np` | now playing | `c` text color | status, title (scrolls), artist |
 | `sb` | system bars | | CPU / MEM / BAT bars |
 | `tc` | tap counter | `z`, `a`, `c` | "Taps: N", the lifetime key counter |

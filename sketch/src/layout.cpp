@@ -246,6 +246,8 @@ static void build_widget(lv_obj_t *p, const Widget &w, RT &r) {
       r.a = lv_img_create(o);
       lv_img_set_src(r.a, WICON[D.wgroup < 6 ? D.wgroup : 0]);
       lv_obj_align(r.a, LV_ALIGN_TOP_MID, 0, 4);
+      lv_obj_set_style_img_recolor(r.a, lv_color_hex(color_of(w, 0xFFFFFF)), 0); // the icons are black: recolored like the original screen does
+      lv_obj_set_style_img_recolor_opa(r.a, LV_OPA_COVER, 0);
       r.b = mklabel(o, &lv_font_montserrat_14, color_of(w, 0xFFFFFF));
       lv_obj_set_width(r.b, lv_pct(100));
       lv_obj_set_style_text_align(r.b, LV_TEXT_ALIGN_CENTER, 0);
