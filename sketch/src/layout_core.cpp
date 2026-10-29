@@ -6,7 +6,7 @@ namespace lc {
 
 static const char *const ERR_NAMES[E_COUNT] = {
   "ok", "empty", "too big", "syntax error", "nested too deep", "unsupported version", "no pages", "too many pages", "bad page",
-  "second main page", "too many widgets", "unknown widget type", "widget outside the 320x240 screen", "bad color", "value out of range",
+  "second main page", "too many widgets", "unknown widget type", "widget outside the 240x320 screen", "bad color", "value out of range",
   "bad text", "text pool full", "trailing data"};
 
 const char *err_name(Err e) { return e < E_COUNT ? ERR_NAMES[e] : "?"; }

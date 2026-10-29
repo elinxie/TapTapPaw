@@ -20,7 +20,7 @@ VERSION = 1
 STATUS = ["ok", "bad packet", "bad sequence", "too big", "checksum mismatch", "unsupported", "no space", "flash write error",
           "invalid layout", "no upload in progress", "incomplete"]
 ERRORS = ["ok", "empty", "too big", "syntax error", "nested too deep", "unsupported version", "no pages", "too many pages", "bad page",
-          "second main page", "too many widgets", "unknown widget type", "widget outside the 320x240 screen", "bad color",
+          "second main page", "too many widgets", "unknown widget type", "widget outside the 240x320 screen", "bad color",
           "value out of range", "bad text", "text pool full", "trailing data"]
 ST = {n: i for i, n in enumerate(STATUS)}
 

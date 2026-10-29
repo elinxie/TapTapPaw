@@ -7,6 +7,7 @@
 #include <LittleFS.h>
 #include <Preferences.h>
 #include <esp_system.h>
+#include <sys/stat.h>
 #include <lvgl.h>
 
 using lc::Widget;
@@ -63,7 +64,14 @@ static const lv_img_dsc_t *WICON[6] = {&ui_img_sun_png, &ui_img_cloud_png, &ui_i
 // ------------------------------------------------------------------------------------------------
 // Storage (LittleFS, same partition as the sounds) + NVS bookkeeping
 // ------------------------------------------------------------------------------------------------
-static bool file_exists() { return LittleFS.exists(FINAL_PATH); }
+// stat() instead of LittleFS.exists(): exists() logs an error line for every missing file
+static bool path_exists(const char *p) {
+  char full[32];
+  snprintf(full, sizeof full, "/littlefs%s", p);
+  struct stat s;
+  return stat(full, &s) == 0;
+}
+static bool file_exists() { return path_exists(FINAL_PATH); }
 
 class FsStorage : public lc::Storage {
   File f;
@@ -699,6 +707,7 @@ static void show_note(const char *text) {
 }
 
 void layout_begin(bool boot_held) {
+  log_i("layout: display %dx%d", (int)lv_disp_get_hor_res(NULL), (int)lv_disp_get_ver_res(NULL)); // layouts are checked against 240x320 (layout_core.h)
   Preferences lp;
   lp.begin("layout", false);
   stored_crc_cache = lp.getUInt("crc", 0);
@@ -711,7 +720,7 @@ void layout_begin(bool boot_held) {
     crashes++;
     lp.putUChar("crash", crashes);
   }
-  if (LittleFS.exists(TMP_PATH)) LittleFS.remove(TMP_PATH); // leftover of an upload that was cut by a reset or power loss
+  if (path_exists(TMP_PATH)) LittleFS.remove(TMP_PATH); // leftover of an upload that was cut by a reset or power loss
   bool stored = file_exists();
   if (stored && stored_crc_cache == 0) stored_crc_cache = 0xFFFFFFFFu; // a layout file with unknown crc (should not happen)
   const char *note = NULL;

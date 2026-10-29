@@ -203,10 +203,10 @@ function spotifyInfo(j) {
   return { title: it.name || '', artist, state: j.is_playing ? 1 : 2 };
 }
 // ---- Widget layout (docs/WIDGETS.md): schema validation, CRC32, upload packets 0x0B..0x11, ack decoding. Unit-tested in test-layout.mjs ----
-const LAYOUT = { VERSION: 1, MAX_BYTES: 4096, MAX_PAGES: 6, MAX_WIDGETS_PAGE: 12, MAX_WIDGETS_TOTAL: 40, MAX_TEXT_POOL: 512, MAX_TEXT_LEN: 24, CHUNK: 192, W: 320, H: 240 };
+const LAYOUT = { VERSION: 1, MAX_BYTES: 4096, MAX_PAGES: 6, MAX_WIDGETS_PAGE: 12, MAX_WIDGETS_TOTAL: 40, MAX_TEXT_POOL: 512, MAX_TEXT_LEN: 24, CHUNK: 192, W: 240, H: 320 };
 // same names and order as Err in sketch/src/layout_core.h
 const LAYOUT_ERRORS = ['ok', 'empty', 'too big', 'syntax error', 'nested too deep', 'unsupported version', 'no pages', 'too many pages', 'bad page',
-  'second main page', 'too many widgets', 'unknown widget type', 'widget outside the 320x240 screen', 'bad color', 'value out of range',
+  'second main page', 'too many widgets', 'unknown widget type', 'widget outside the 240x320 screen', 'bad color', 'value out of range',
   'bad text', 'text pool full', 'trailing data'];
 const WIDGET_TYPES = ['', 'ac', 'dc', 'wx', 'np', 'sb', 'tc', 'tx', 'mc', 'sh', 'sl'];
 const LAYOUT_STATUS = ['ok', 'bad packet', 'bad sequence', 'too big', 'checksum mismatch', 'unsupported', 'no space', 'flash write error', 'invalid layout', 'no upload in progress', 'incomplete'];
@@ -310,7 +310,7 @@ function checkWidget(w, st) {
     if (key === 't') { if (typeof v !== 'string') return 'syntax error'; type = WIDGET_TYPES.indexOf(v); if (type <= 0) return 'unknown widget type'; }
     else if (key === 'x' || key === 'y' || key === 'w' || key === 'h') {
       if (!isInt(v)) return 'syntax error';
-      if (Math.abs(v) > 9999) return 'widget outside the 320x240 screen';
+      if (Math.abs(v) > 9999) return 'widget outside the 240x320 screen';
       g[key] = v;
       if (key === 'x') hx = true; else if (key === 'y') hy = true; else if (key === 'w') hw = true; else hh = true;
     }
@@ -329,8 +329,8 @@ function checkWidget(w, st) {
     }
   }
   if (type <= 0) return 'unknown widget type';
-  if (!(hx && hy && hw && hh)) return 'widget outside the 320x240 screen';
-  if (g.x < 0 || g.y < 0 || g.w < 1 || g.h < 1 || g.x + g.w > LAYOUT.W || g.y + g.h > LAYOUT.H) return 'widget outside the 320x240 screen';
+  if (!(hx && hy && hw && hh)) return 'widget outside the 240x320 screen';
+  if (g.x < 0 || g.y < 0 || g.w < 1 || g.h < 1 || g.x + g.w > LAYOUT.W || g.y + g.h > LAYOUT.H) return 'widget outside the 240x320 screen';
   if ((type === 10 || type === 9) && k > 1) return 'value out of range'; // slider, shape
   if (type === 7) {
     if (text === null || text.length === 0) return 'bad text';

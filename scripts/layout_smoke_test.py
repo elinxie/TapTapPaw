@@ -3,7 +3,7 @@
     ~/.venvs/pio39/bin/python scripts/layout_smoke_test.py [--port /dev/cu.usbserial-110]
 Needs firmware with the layout engine flashed, the TapTapPaw desktop app quit, and no layout the user wants to keep
 (the test ends with RESET, i.e. back to the built-in screens). Exit code 0 = every check passed."""
-import argparse, os, struct, sys, time, zlib
+import argparse, os, re, struct, sys, time, zlib
 sys.path.insert(0, os.path.dirname(__file__))
 from layout_tool import Board, ST, begin_pkt, chunk_pkt, pkt, CHUNK
 
@@ -29,7 +29,11 @@ def main():
     example = open(os.path.join(ROOT, "docs/layout-example.json"), "rb").read().strip()
     crc_ex = zlib.crc32(example)
 
-    b = Board(args.port)
+    b = Board(args.port, boot_wait=0.5)
+    b.hard_reset(boot_wait=0)  # reboot and capture the boot log (opening the port does not always reset the board)
+    boot = b.read_text(5.0)
+    m = re.search(r"layout: display (\d+)x(\d+)", boot)
+    check("display reported at boot is 240x320 portrait (the layout limits)", m is not None and (m.group(1), m.group(2)) == ("240", "320"), m.group(0) if m else "no display line in the boot log")
     q = b.query()
     check("board answers a query", q is not None)
     if q is None:
@@ -48,7 +52,7 @@ def main():
         "truncated layout": example[:-7],
         "bad version inside json": example.replace(b'"v":1', b'"v":7', 1),
         "unknown widget": example.replace(b'"t":"dc"', b'"t":"zz"', 1),
-        "widget off screen": example.replace(b'"x":12,"y":10,"w":170', b'"x":300,"y":10,"w":170', 1),
+        "widget off screen": example.replace(b'"x":12,"y":10,"w":170', b'"x":100,"y":10,"w":170', 1),
         "not json": b"hello board",
         "empty object": b"{}",
     }
@@ -142,7 +146,7 @@ def main():
     check("line noise / truncated frame: board still answers after a resync", q is not None or b.query() is not None)
 
     # 11 every widget type on screen, cycling the pages (auto-rotate 3 s) while watching the heap in the firmware log
-    import json, re
+    import json
     lay = json.loads(example)
     lay["pg"] = [p for p in lay["pg"] if not p.get("m")]  # custom pages only, so page 0 is built from widgets right away
     lay["rot"] = 3

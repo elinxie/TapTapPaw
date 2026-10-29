@@ -1,7 +1,7 @@
 # Widget layouts (no-code home screen)
 
 The board can show a **layout** instead of its built-in main screen: several pages of widgets (clock, weather, now playing, ...) on a
-320x240 canvas, each page with its own background. Nothing is compiled: the web page builds a small JSON file and sends it to the
+240x320 (portrait) canvas, each page with its own background. Nothing is compiled: the web page builds a small JSON file and sends it to the
 board over USB; the firmware reads it and builds the screens.
 
 Status: **Phase 1 (layout engine + upload protocol)** is implemented. The drag-and-drop builder page (Phase 2) and custom image
@@ -15,7 +15,7 @@ put arbitrary HTML, CSS, images or fonts on it.
 
 | You can | You cannot (yet) |
 |---------|------------------|
-| Place the widget types below, anywhere on 320x240, up to 12 per page, 6 pages, 40 in total | Add new widget types, custom fonts or custom icons without new firmware |
+| Place the widget types below, anywhere on the 240x320 portrait screen, up to 12 per page, 6 pages, 40 in total | Add new widget types, custom fonts or custom icons without new firmware |
 | Pick colors, text size (small/large), alignment, opacity, corner radius for the widgets that have them | Resize the analog clock or the mood cat (they have a fixed size) |
 | Choose a page background: weather-driven (default), one of the 6 built-in wallpapers, solid color, vertical gradient | Custom image backgrounds (Phase 3) |
 | Keep the original main screen as one of the pages (`{"m":1}`) | Edit the original main screen's parts individually |
@@ -25,7 +25,7 @@ With **no layout stored the board behaves exactly as before**: the same screens,
 
 ## Layout file (schema version 1)
 
-Compact JSON, at most **4096 bytes** (the example is 687 bytes). Integers only. Unknown keys are ignored (forward compatible).
+Compact JSON, at most **4096 bytes** (the example is 647 bytes). Integers only. Unknown keys are ignored (forward compatible).
 
 ```
 {"v":1, "rot":0, "pg":[ PAGE, ... ]}
@@ -50,7 +50,7 @@ Compact JSON, at most **4096 bytes** (the example is 687 bytes). Integers only. 
 | `{"t":"g","c":"#top","d":"#bottom"}` | vertical gradient |
 
 **Widget**: `{"t":TYPE,"x":,"y":,"w":,"h":, ...options}`. `x y w h` are required for every widget (even the fixed-size ones) and the
-widget must lie fully inside 320x240.
+widget must lie fully inside the screen: 240 wide x 320 tall, portrait like the original screens (panel 240x320, rotation 0, or 180 degrees with the rotate setting).
 
 | `t` | Widget | Options | Notes |
 |-----|--------|---------|-------|
@@ -145,14 +145,14 @@ node web-sync/test-packets.mjs       # existing packets, unchanged
 ~/.venvs/pio39/bin/python scripts/layout_tool.py info | reset
 ```
 
-`sketch/test/host/layout-cases.tsv` is a table of 73 layouts with the expected verdict; the firmware parser and the page validator must
+`sketch/test/host/layout-cases.tsv` is a table of 76 layouts with the expected verdict; the firmware parser and the page validator must
 both agree with every row.
 
 ## Measured size (build flags `-DINVERT_COLORS_DEFAULT=1`)
 
 | | Before (`feature/wifi-mode`) | Phase 1 | Change |
 |--|--|--|--|
-| `esp32dev` flash (1,441,792 B partition) | 1,277,353 B (88.6 %) | 1,294,189 B (89.8 %) | +16,836 B, ~147 KB left |
+| `esp32dev` flash (1,441,792 B partition) | 1,277,353 B (88.6 %) | 1,294,433 B (89.8 %) | +17,080 B, ~147 KB left |
 | `esp32dev` RAM (static) | 57,552 B (17.6 %) | 59,752 B (18.2 %) | +2,200 B |
-| `esp32dev_wifi` flash (2,883,584 B partition) | 1,950,537 B (67.6 %) | 1,966,497 B (68.2 %) | +15,960 B |
+| `esp32dev_wifi` flash (2,883,584 B partition) | 1,950,537 B (67.6 %) | 1,966,785 B (68.2 %) | +16,248 B |
 | `esp32dev_wifi` RAM (static) | 83,020 B (25.3 %) | 85,204 B (26.0 %) | +2,184 B |

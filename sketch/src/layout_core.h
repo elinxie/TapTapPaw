@@ -16,8 +16,8 @@ constexpr uint8_t MAX_WIDGETS_TOTAL = 40;
 constexpr size_t MAX_TEXT_POOL = 512;
 constexpr uint8_t MAX_TEXT_LEN = 24;
 constexpr uint16_t CHUNK_BYTES = 192; // fixed chunk size: chunk n starts at byte n * 192
-constexpr uint16_t SCREEN_W = 320;
-constexpr uint16_t SCREEN_H = 240;
+constexpr uint16_t SCREEN_W = 240; // portrait: panel 240x320, rotation 0/2 (LGFX_CYD.h)
+constexpr uint16_t SCREEN_H = 320;
 
 enum WType : uint8_t { W_NONE = 0, W_ANALOG, W_DIGITAL, W_WEATHER, W_NOWPLAY, W_SYSBARS, W_TAPS, W_LABEL, W_MOOD, W_SHAPE, W_SLIDER, W_COUNT };
 enum BgType : uint8_t { BG_WEATHER = 0, BG_BUILTIN, BG_SOLID, BG_GRADIENT };
