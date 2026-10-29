@@ -202,6 +202,190 @@ function spotifyInfo(j) {
   const artist = it.artists ? it.artists.map((a) => a.name).join(', ') : (it.show ? it.show.name : '');
   return { title: it.name || '', artist, state: j.is_playing ? 1 : 2 };
 }
+// ---- Widget layout (docs/WIDGETS.md): schema validation, CRC32, upload packets 0x0B..0x11, ack decoding. Unit-tested in test-layout.mjs ----
+const LAYOUT = { VERSION: 1, MAX_BYTES: 4096, MAX_PAGES: 6, MAX_WIDGETS_PAGE: 12, MAX_WIDGETS_TOTAL: 40, MAX_TEXT_POOL: 512, MAX_TEXT_LEN: 24, CHUNK: 192, W: 320, H: 240 };
+// same names and order as Err in sketch/src/layout_core.h
+const LAYOUT_ERRORS = ['ok', 'empty', 'too big', 'syntax error', 'nested too deep', 'unsupported version', 'no pages', 'too many pages', 'bad page',
+  'second main page', 'too many widgets', 'unknown widget type', 'widget outside the 320x240 screen', 'bad color', 'value out of range',
+  'bad text', 'text pool full', 'trailing data'];
+const WIDGET_TYPES = ['', 'ac', 'dc', 'wx', 'np', 'sb', 'tc', 'tx', 'mc', 'sh', 'sl'];
+const LAYOUT_STATUS = ['ok', 'bad packet', 'bad sequence', 'too big', 'checksum mismatch', 'unsupported', 'no space', 'flash write error', 'invalid layout', 'no upload in progress', 'incomplete'];
+const LAYOUT_FLAGS = { ACTIVE: 1, SAFE_MODE: 2, SESSION_OPEN: 4, STORED: 8 };
+const LERR = {}; LAYOUT_ERRORS.forEach((n, i) => { LERR[n] = i; });
+
+let crcTable = null;
+function crc32(bytes, crc = 0) { // zlib / IEEE CRC32, same as the board and python's zlib.crc32
+  if (!crcTable) { crcTable = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); crcTable[n] = c >>> 0; } }
+  let c = ~crc >>> 0;
+  for (let i = 0; i < bytes.length; i++) c = crcTable[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return ~c >>> 0;
+}
+const isInt = (v) => typeof v === 'number' && Number.isInteger(v);
+const utf8 = (s) => new TextEncoder().encode(s);
+const BAD_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+// Validates a layout given as JSON text (what is sent to the board) and mirrors layout_core.cpp.
+// Returns { ok, err (name), code, bytes (Uint8Array when ok) }.
+function validateLayout(text) {
+  const fail = (name) => ({ ok: false, err: name, code: LERR[name] });
+  if (typeof text !== 'string' || text.length === 0) return fail('empty');
+  const raw = utf8(text);
+  if (raw.length > LAYOUT.MAX_BYTES) return fail('too big');
+  let o;
+  try { o = JSON.parse(text); } catch (e) { return fail(/after JSON/.test(String(e && e.message)) ? 'trailing data' : 'syntax error'); }
+  const e = checkRoot(o);
+  return e ? fail(e) : { ok: true, err: 'ok', code: 0, bytes: raw };
+}
+
+function colorErr(v) { return typeof v !== 'string' ? 'syntax error' : /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(v) ? null : 'bad color'; }
+function intIn(v, lo, hi) { return !isInt(v) ? 'syntax error' : (v < lo || v > hi) ? 'value out of range' : null; }
+
+function checkRoot(o) {
+  if (o === null || typeof o !== 'object' || Array.isArray(o)) return 'syntax error';
+  let hv = false, hp = false, e;
+  const st = { widgets: 0, text: 0, mains: 0 };
+  for (const k of Object.keys(o)) {
+    const v = o[k];
+    if (k === 'v') { hv = true; if (!isInt(v)) return 'syntax error'; if (v !== LAYOUT.VERSION) return 'unsupported version'; }
+    else if (k === 'rot') { if (!isInt(v)) return 'syntax error'; if (v !== 0 && (v < 3 || v > 600)) return 'value out of range'; }
+    else if (k === 'pg') {
+      hp = true;
+      if (!Array.isArray(v)) return 'syntax error';
+      for (const pg of v) { if (st.pages >= LAYOUT.MAX_PAGES) return 'too many pages'; st.pages = (st.pages | 0) + 1; e = checkPage(pg, st); if (e) return e; }
+    }
+  }
+  if (!hv) return 'unsupported version';
+  if (!hp || !(st.pages > 0)) return 'no pages';
+  return null;
+}
+
+function checkPage(p, st) {
+  if (p === null || typeof p !== 'object' || Array.isArray(p)) return 'syntax error';
+  let isMain = false, hasBg = false, hasW = false, e, n = 0;
+  for (const k of Object.keys(p)) {
+    const v = p[k];
+    if (k === 'm') { e = intIn(v, 0, 1); if (e) return e; isMain = v === 1; }
+    else if (k === 'bg') { hasBg = true; e = checkBg(v); if (e) return e; }
+    else if (k === 'w') {
+      hasW = true;
+      if (!Array.isArray(v)) return 'syntax error';
+      for (const w of v) {
+        if (n >= LAYOUT.MAX_WIDGETS_PAGE) return 'too many widgets';
+        if (st.widgets >= LAYOUT.MAX_WIDGETS_TOTAL) return 'too many widgets';
+        e = checkWidget(w, st); if (e) return e;
+        n++; st.widgets++;
+      }
+    }
+  }
+  if (isMain) {
+    if (hasBg || (hasW && n > 0)) return 'bad page';
+    if (st.mains > 0) return 'second main page';
+    st.mains++;
+  }
+  return null;
+}
+
+function checkBg(b) {
+  if (b === null || typeof b !== 'object' || Array.isArray(b)) return 'syntax error';
+  let t = 'w', idx = -1, hc = false, hd = false, e;
+  for (const k of Object.keys(b)) {
+    const v = b[k];
+    if (k === 't') { if (typeof v !== 'string') return 'syntax error'; if (!['w', 'b', 's', 'g'].includes(v)) return 'bad page'; t = v; }
+    else if (k === 'i') { e = intIn(v, 0, 5); if (e) return e; idx = v; }
+    else if (k === 'c') { e = colorErr(v); if (e) return e; hc = true; }
+    else if (k === 'd') { e = colorErr(v); if (e) return e; hd = true; }
+  }
+  if (t === 'b' && idx < 0) return 'value out of range';
+  if (t === 's' && !hc) return 'bad color';
+  if (t === 'g' && !(hc && hd)) return 'bad color';
+  return null;
+}
+
+function checkWidget(w, st) {
+  if (w === null || typeof w !== 'object' || Array.isArray(w)) return 'syntax error';
+  let type = 0, hx = false, hy = false, hw = false, hh = false, k = 0, text = null, e;
+  const g = {};
+  for (const key of Object.keys(w)) {
+    const v = w[key];
+    if (key === 't') { if (typeof v !== 'string') return 'syntax error'; type = WIDGET_TYPES.indexOf(v); if (type <= 0) return 'unknown widget type'; }
+    else if (key === 'x' || key === 'y' || key === 'w' || key === 'h') {
+      if (!isInt(v)) return 'syntax error';
+      if (Math.abs(v) > 9999) return 'widget outside the 320x240 screen';
+      g[key] = v;
+      if (key === 'x') hx = true; else if (key === 'y') hy = true; else if (key === 'w') hw = true; else hh = true;
+    }
+    else if (key === 'k') { e = intIn(v, 0, 2); if (e) return e; k = v; }
+    else if (key === 'z') { e = intIn(v, 0, 1); if (e) return e; }
+    else if (key === 'a') { e = intIn(v, 0, 2); if (e) return e; }
+    else if (key === 'r') { e = intIn(v, 0, 120); if (e) return e; }
+    else if (key === 'o') { e = intIn(v, 0, 255); if (e) return e; }
+    else if (key === 'f' || key === 'q') { e = intIn(v, 0, 1); if (e) return e; }
+    else if (key === 'c') { e = colorErr(v); if (e) return e; }
+    else if (key === 's') {
+      if (typeof v !== 'string') return 'syntax error';
+      if (/[\u0000-\u001F]/.test(v) || BAD_SURROGATE.test(v)) return 'syntax error';
+      if (utf8(v).length > LAYOUT.MAX_TEXT_LEN) return 'bad text';
+      text = v;
+    }
+  }
+  if (type <= 0) return 'unknown widget type';
+  if (!(hx && hy && hw && hh)) return 'widget outside the 320x240 screen';
+  if (g.x < 0 || g.y < 0 || g.w < 1 || g.h < 1 || g.x + g.w > LAYOUT.W || g.y + g.h > LAYOUT.H) return 'widget outside the 320x240 screen';
+  if ((type === 10 || type === 9) && k > 1) return 'value out of range'; // slider, shape
+  if (type === 7) {
+    if (text === null || text.length === 0) return 'bad text';
+    const n = utf8(text).length;
+    if (st.text + n + 1 > LAYOUT.MAX_TEXT_POOL) return 'text pool full';
+    st.text += n + 1;
+  }
+  return null;
+}
+
+// ---- upload packets (host -> board), see layout_core.h ----
+const le32 = (v) => [v & 0xFF, (v >>> 8) & 0xFF, (v >>> 16) & 0xFF, (v >>> 24) & 0xFF];
+function layoutBeginPacket(bytes, kind = 0, slot = 0) { return pkt(0x0B, [kind, slot, LAYOUT.VERSION, ...le32(bytes.length), ...le32(crc32(bytes))]); }
+function layoutChunkCount(n) { return Math.ceil(n / LAYOUT.CHUNK); }
+function layoutChunkPacket(seq, bytes) { const d = bytes.subarray(seq * LAYOUT.CHUNK, (seq + 1) * LAYOUT.CHUNK); return pkt(0x0C, [seq & 0xFF, seq >> 8, ...d]); }
+const layoutEndPacket = () => pkt(0x0D, []);
+const layoutAbortPacket = () => pkt(0x0E, []);
+const layoutQueryPacket = () => pkt(0x0F, []);
+const layoutResetPacket = () => pkt(0x11, []);
+
+// Board -> host ack 0x10: [FF][10][12][cmd][status][detail][flags][seq u16][free_kb u16][crc u32]. Returns null if u8 is not a complete ack frame.
+function parseLayoutAck(u) {
+  if (!u || u.length < 15 || u[0] !== 0xFF || u[1] !== 0x10 || u[2] !== 12) return null;
+  return { cmd: u[3], status: u[4], statusName: LAYOUT_STATUS[u[4]] || ('status ' + u[4]), detail: u[5],
+    detailName: u[4] === 8 ? (LAYOUT_ERRORS[u[5]] || '?') : '', flags: u[6],
+    active: !!(u[6] & 1), safeMode: !!(u[6] & 2), sessionOpen: !!(u[6] & 4), stored: !!(u[6] & 8),
+    seq: u[7] | (u[8] << 8), freeKb: u[9] | (u[10] << 8), crc: (u[11] | (u[12] << 8) | (u[13] << 16) | (u[14] << 24)) >>> 0 };
+}
+
+// Upload driver: stop-and-wait with retry and resume. io = { send(u8), ack(cmd, ms) -> Promise<ack|null>, onProgress?(done,total) }
+async function uploadLayoutBytes(bytes, io, opts = {}) {
+  const tries = opts.tries || 3, ms = opts.timeoutMs || 1500;
+  const call = async (packet, cmd) => { for (let t = 0; t < tries; t++) { io.send(packet); const a = await io.ack(cmd, ms); if (a) return a; } return null; };
+  const fail = (stage, ack) => ({ ok: false, stage, ack, message: ack ? (stage + ': ' + ack.statusName + (ack.detailName ? ' (' + ack.detailName + ')' : '')) : (stage + ': no answer from the board') });
+  const total = layoutChunkCount(bytes.length);
+  let a = await call(layoutBeginPacket(bytes), 0x0B);
+  if (!a || a.status !== 0) return fail('begin', a);
+  let seq = a.seq; // 0, or where an interrupted upload of the same layout stopped
+  let guard = total * 4 + 8;
+  while (seq < total && guard-- > 0) {
+    a = await call(layoutChunkPacket(seq, bytes), 0x0C);
+    if (!a) { try { io.send(layoutAbortPacket()); } catch (e) { /* ignore */ } return fail('chunk ' + seq, null); }
+    if (a.status === 2) { seq = a.seq; continue; } // board expects another chunk: follow it
+    if (a.status !== 0) return fail('chunk ' + seq, a);
+    seq = a.seq;
+    if (io.onProgress) io.onProgress(Math.min(seq, total), total);
+  }
+  if (seq < total) return fail('chunk', null);
+  a = await call(layoutEndPacket(), 0x0D);
+  if (!a || a.status !== 0) return fail('end', a);
+  const q = await call(layoutQueryPacket(), 0x0F); // verify: the board reports the crc of the layout it stored
+  if (!q || q.crc !== crc32(bytes)) return { ok: false, stage: 'verify', ack: q, message: 'verify: checksum read back from the board does not match' };
+  return { ok: true, ack: q, message: 'layout stored and verified' };
+}
+
 // ---- UI ---- (everything below needs a browser; the packet code above is unit-tested in test-packets.mjs)
 if (!window.__ttpReturn) { // the Spotify sign-in popup only runs the small script in <head>
 const $ = (id) => document.getElementById(id);
