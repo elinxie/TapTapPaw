@@ -127,6 +127,32 @@ class Board:
     def abort(self):
         return self.call(pkt(0x0E), 0x0E)
 
+    def upload_kind(self, data, kind, slot):
+        """Picture (kind 1, slot 0..7) or album art (kind 2). The END ack carries the crc the board read back."""
+        n = (len(data) + CHUNK - 1) // CHUNK
+        a = self.call(begin_pkt(data, kind=kind, slot=slot), 0x0B)
+        if not a or a.status != 0:
+            return False, a
+        seq = a.seq
+        while seq < n:
+            a = self.call(chunk_pkt(data, seq), 0x0C)
+            if not a:
+                return False, None
+            if a.status == ST["bad sequence"]:
+                seq = a.seq
+                continue
+            if a.status != 0:
+                return False, a
+            seq = a.seq
+        a = self.call(pkt(0x0D), 0x0D, timeout=5.0)  # the board test-decodes the picture before it answers
+        return bool(a and a.status == 0 and a.crc == zlib.crc32(data)), a
+
+    def picture_crc(self, slot):
+        return self.call(pkt(0x0F, bytes([slot])), 0x0F)
+
+    def remove_picture(self, slot):
+        return self.call(pkt(0x11, bytes([slot])), 0x11)
+
     def upload(self, data, log=print):
         n = (len(data) + CHUNK - 1) // CHUNK
         a = self.call(begin_pkt(data), 0x0B)
@@ -154,7 +180,8 @@ class Board:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["info", "upload", "reset"])
+    ap.add_argument("cmd", choices=["info", "upload", "reset", "picture"])
+    ap.add_argument("--slot", type=int, default=0, help="picture slot 0..7 (picture command)")
     ap.add_argument("file", nargs="?")
     ap.add_argument("--port")
     args = ap.parse_args()
@@ -164,6 +191,10 @@ def main():
             print(b.query())
         elif args.cmd == "reset":
             print(b.reset_layout())
+        elif args.cmd == "picture":
+            ok, a = b.upload_kind(open(args.file, "rb").read(), 1, args.slot)
+            print(("OK: " if ok else "FAILED: ") + repr(a))
+            sys.exit(0 if ok else 1)
         else:
             data = open(args.file, "rb").read().strip()
             ok, msg = b.upload(data)

@@ -873,7 +873,8 @@ void loop() {
   sleepy_animation(); // handle sleepy animation
   eye_blink_animation(); // handle eye blinking animation
 
-  if (Serial.available()) {
+  // up to 256 bytes per pass (was 1): picture uploads move 64 KB, one byte per loop pass made that crawl
+  for (int n = 0; n < 256 && Serial.available(); n++) {
     b = Serial.read();
     serial_parse(b);
   }

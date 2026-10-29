@@ -96,23 +96,55 @@ static const lv_img_dsc_t *WICON[6] = {&ui_img_sun_png, &ui_img_cloud_png, &ui_i
 // ------------------------------------------------------------------------------------------------
 // stat() instead of LittleFS.exists(): exists() logs an error line for every missing file
 static bool path_exists(const char *p) {
-  char full[32];
+  char full[40];
   snprintf(full, sizeof full, "/littlefs%s", p);
   struct stat s;
   return stat(full, &s) == 0;
 }
 static bool file_exists() { return path_exists(FINAL_PATH); }
 
+// ---- pictures (upload kind 1, LittleFS /img/<slot>.sjpg) and album art (kind 2, RAM only) ----
+static const char *PIC_TMP = "/img/tmp.part";
+static void pic_path(uint8_t slot, char *out, size_t n) { snprintf(out, n, "/img/%u.sjpg", (unsigned)slot); }
+static void pic_lv_path(uint8_t slot, char *out, size_t n) { snprintf(out, n, "S:/img/%u.sjpg", (unsigned)slot); } // LVGL drive S = LittleFS
+static bool pic_exists(uint8_t slot) {
+  char p[24];
+  pic_path(slot, p, sizeof p);
+  return path_exists(p);
+}
+static uint8_t *art_buf = NULL, *art_tmp = NULL; // album art JPEG (shown) and the one being received
+static size_t art_len = 0, art_tmp_len = 0, art_tmp_cap = 0;
+static lv_img_dsc_t art_dsc; // LVGL decodes the JPEG from RAM with its SJPG/JPEG decoder
+
 class FsStorage : public lc::Storage {
   File f;
+  uint8_t kind = 0;
+  const char *tmp_path() const { return kind == lc::KIND_PICTURE ? PIC_TMP : TMP_PATH; }
 
  public:
   size_t free_bytes() override { return LittleFS.totalBytes() - LittleFS.usedBytes(); }
-  bool tmp_open() override {
-    f = LittleFS.open(TMP_PATH, "w");
+  bool tmp_open(uint8_t k, uint8_t) override {
+    kind = k;
+    if (k == lc::KIND_ART) {
+      free(art_tmp);
+      art_tmp = (uint8_t *)malloc(lc::MAX_ART_BYTES);
+      art_tmp_len = 0;
+      art_tmp_cap = art_tmp ? lc::MAX_ART_BYTES : 0;
+      return art_tmp != NULL;
+    }
+    if (k == lc::KIND_PICTURE && !path_exists("/img")) LittleFS.mkdir("/img");
+    f = LittleFS.open(tmp_path(), "w");
     return (bool)f;
   }
-  bool tmp_write(const uint8_t *d, size_t n) override { return f && f.write(d, n) == n; }
+  bool tmp_write(const uint8_t *d, size_t n) override {
+    if (kind == lc::KIND_ART) {
+      if (!art_tmp || art_tmp_len + n > art_tmp_cap) return false;
+      memcpy(art_tmp + art_tmp_len, d, n);
+      art_tmp_len += n;
+      return true;
+    }
+    return f && f.write(d, n) == n;
+  }
   bool tmp_close() override {
     if (f) f.close();
     return true;
@@ -129,14 +161,70 @@ class FsStorage : public lc::Storage {
     r.close();
     return n == sz;
   }
-  bool tmp_commit() override {
-    if (LittleFS.rename(TMP_PATH, FINAL_PATH)) return true;
-    LittleFS.remove(FINAL_PATH); // some littlefs builds refuse to rename over an existing file
-    return LittleFS.rename(TMP_PATH, FINAL_PATH);
+  bool tmp_scan(uint32_t &crc, size_t &n, uint8_t *head, size_t head_n, uint8_t *tail2) override {
+    crc = 0;
+    n = 0;
+    if (kind == lc::KIND_ART) { // RAM: nothing was written to flash, check the buffer itself
+      if (!art_tmp) return false;
+      crc = lc::crc32(art_tmp, art_tmp_len);
+      n = art_tmp_len;
+      memcpy(head, art_tmp, n < head_n ? n : head_n);
+      if (n >= 2) memcpy(tail2, art_tmp + n - 2, 2);
+      return true;
+    }
+    File r = LittleFS.open(tmp_path(), "r");
+    if (!r) return false;
+    uint8_t blk[256];
+    for (;;) {
+      int got = r.read(blk, sizeof blk);
+      if (got <= 0) break;
+      if (n < head_n) memcpy(head + n, blk, (size_t)got < head_n - n ? (size_t)got : head_n - n);
+      crc = lc::crc32_update(crc, blk, (size_t)got);
+      n += (size_t)got;
+      if (got >= 2) memcpy(tail2, blk + got - 2, 2);
+      else if (got == 1) { tail2[0] = tail2[1]; tail2[1] = blk[0]; }
+    }
+    r.close();
+    return true;
+  }
+  bool tmp_commit(uint8_t k, uint8_t slot) override {
+    if (k == lc::KIND_ART) { // swap in the new art; the old buffer is freed after LVGL forgets it
+      uint8_t *old = art_buf;
+      art_buf = art_tmp;
+      art_len = art_tmp_len;
+      art_tmp = NULL;
+      art_tmp_len = art_tmp_cap = 0;
+      lv_img_cache_invalidate_src(&art_dsc);
+      memset(&art_dsc, 0, sizeof art_dsc);
+      art_dsc.header.cf = LV_IMG_CF_RAW;
+      art_dsc.header.w = 96;
+      art_dsc.header.h = 96;
+      art_dsc.data_size = art_len;
+      art_dsc.data = art_buf;
+      free(old);
+      return true;
+    }
+    char fin[24];
+    if (k == lc::KIND_PICTURE) pic_path(slot, fin, sizeof fin);
+    else strlcpy(fin, FINAL_PATH, sizeof fin);
+    if (k == lc::KIND_PICTURE) { // LVGL may hold the old file open for its image cache
+      char lvp[24];
+      pic_lv_path(slot, lvp, sizeof lvp);
+      lv_img_cache_invalidate_src(lvp);
+    }
+    if (LittleFS.rename(tmp_path(), fin)) return true;
+    LittleFS.remove(fin); // some littlefs builds refuse to rename over an existing file
+    return LittleFS.rename(tmp_path(), fin);
   }
   void tmp_discard() override {
+    if (kind == lc::KIND_ART) {
+      free(art_tmp);
+      art_tmp = NULL;
+      art_tmp_len = art_tmp_cap = 0;
+      return;
+    }
     if (f) f.close();
-    LittleFS.remove(TMP_PATH);
+    LittleFS.remove(tmp_path());
   }
   bool final_remove() override { return !file_exists() || LittleFS.remove(FINAL_PATH); }
   uint32_t stored_crc() override { return stored_crc_cache; }
@@ -151,6 +239,53 @@ class FsStorage : public lc::Storage {
   uint8_t state_flags() override {
     return (uint8_t)((active ? lc::FL_LAYOUT_ACTIVE : 0) | (safe_reason ? lc::FL_SAFE_MODE : 0) | (file_exists() ? lc::FL_LAYOUT_STORED : 0) |
                      (ble_keys_available() ? lc::FL_BLE_KEYS : 0) | (ble_keys_connected() ? lc::FL_BLE_PAIRED : 0));
+  }
+  uint32_t picture_crc(uint8_t slot) override {
+    if (!pic_exists(slot)) return 0;
+    Preferences lp;
+    lp.begin("layout", true);
+    char key[8];
+    snprintf(key, sizeof key, "pic%u", (unsigned)slot);
+    uint32_t c = lp.getUInt(key, 0);
+    lp.end();
+    return c;
+  }
+  void set_picture_crc(uint8_t slot, uint32_t c) override {
+    Preferences lp;
+    lp.begin("layout", false);
+    char key[8];
+    snprintf(key, sizeof key, "pic%u", (unsigned)slot);
+    lp.putUInt(key, c);
+    lp.end();
+  }
+  bool picture_check(uint8_t k, uint8_t slot) override {
+    char lvp[24];
+    const void *src = &art_dsc;
+    if (k == lc::KIND_PICTURE) {
+      pic_lv_path(slot, lvp, sizeof lvp);
+      src = lvp;
+    }
+    lv_img_decoder_dsc_t dsc;
+    if (lv_img_decoder_open(&dsc, src, lv_color_white(), 0) != LV_RES_OK) return false;
+    bool ok = dsc.img_data != NULL; // a JPEG from RAM is decoded whole on open
+    if (!ok && dsc.header.w > 0) { // SJPG is decoded a line at a time: decode the first and the last line
+      lv_color_t *line = (lv_color_t *)malloc(dsc.header.w * sizeof(lv_color_t));
+      if (line) {
+        ok = lv_img_decoder_read_line(&dsc, 0, 0, dsc.header.w, (uint8_t *)line) == LV_RES_OK &&
+             lv_img_decoder_read_line(&dsc, 0, dsc.header.h - 1, dsc.header.w, (uint8_t *)line) == LV_RES_OK;
+        free(line);
+      }
+    }
+    lv_img_decoder_close(&dsc);
+    log_i("picture check kind %u slot %u: %s", (unsigned)k, (unsigned)slot, ok ? "decodes" : "CANNOT decode");
+    return ok;
+  }
+  bool picture_remove(uint8_t slot) override {
+    char p[24], lvp[24];
+    pic_path(slot, p, sizeof p);
+    pic_lv_path(slot, lvp, sizeof lvp);
+    lv_img_cache_invalidate_src(lvp);
+    return !path_exists(p) || LittleFS.remove(p);
   }
 };
 static FsStorage fs_store;
@@ -454,6 +589,29 @@ static void build_widget(lv_obj_t *p, const Widget &w, RT &r) {
       r.a = o;
       break;
     }
+    case lc::W_PICTURE: case lc::W_ALBUM: {
+      bool have = w.type == lc::W_PICTURE ? pic_exists(w.i) : art_buf != NULL;
+      if (!have) { // placeholder: the picture has not been sent yet
+        lv_obj_t *o = mkbox(p, w);
+        panel_style(o);
+        lv_obj_t *l = mklabel(o, &lv_font_montserrat_14, 0xA99BB3);
+        lv_label_set_text(l, w.type == lc::W_PICTURE ? LV_SYMBOL_IMAGE : LV_SYMBOL_AUDIO);
+        lv_obj_center(l);
+        break;
+      }
+      lv_obj_t *im = lv_img_create(p);
+      lv_obj_set_pos(im, w.x, w.y);
+      lv_obj_set_size(im, w.w, w.h);
+      if (w.type == lc::W_PICTURE) {
+        char lvp[24];
+        pic_lv_path(w.i, lvp, sizeof lvp);
+        lv_img_set_src(im, lvp);
+      } else {
+        lv_img_set_src(im, &art_dsc);
+      }
+      r.a = im;
+      break;
+    }
     case lc::W_TCAT: { // the original screen's typing cat, same parts and offsets; layout_sync_cat() mirrors their state
       lv_obj_t *o = lv_obj_create(p);
       lv_obj_remove_style_all(o);
@@ -511,6 +669,15 @@ static void apply_bg(lv_obj_t *scr, const lc::Page &pg) {
     case lc::BG_WEATHER: lv_obj_set_style_bg_img_src(scr, wallpaper_img[D.wall < 6 ? D.wall : 0], 0); break;
     case lc::BG_BUILTIN: lv_obj_set_style_bg_img_src(scr, wallpaper_img[pg.bg_idx < 6 ? pg.bg_idx : 0], 0); break;
     case lc::BG_SOLID: lv_obj_set_style_bg_color(scr, lv_color_hex(pg.c1), 0); break;
+    case lc::BG_IMAGE:
+      if (pic_exists(pg.bg_idx)) {
+        static char bg_path[lc::PICTURE_SLOTS][24]; // style keeps the pointer: one stable string per slot
+        pic_lv_path(pg.bg_idx, bg_path[pg.bg_idx], sizeof bg_path[0]);
+        lv_obj_set_style_bg_img_src(scr, bg_path[pg.bg_idx], 0);
+      } else {
+        lv_obj_set_style_bg_img_src(scr, wallpaper_img[D.wall < 6 ? D.wall : 0], 0); // not sent yet: weather wallpaper
+      }
+      break;
     case lc::BG_GRADIENT:
       lv_obj_set_style_bg_color(scr, lv_color_hex(pg.c1), 0);
       lv_obj_set_style_bg_grad_color(scr, lv_color_hex(pg.c2), 0);
@@ -1110,6 +1277,7 @@ void layout_begin(bool boot_held) {
     lp.putUChar("crash", crashes);
   }
   if (path_exists(TMP_PATH)) LittleFS.remove(TMP_PATH); // leftover of an upload that was cut by a reset or power loss
+  if (path_exists(PIC_TMP)) LittleFS.remove(PIC_TMP);
   bool stored = file_exists();
   if (stored && stored_crc_cache == 0) stored_crc_cache = 0xFFFFFFFFu; // a layout file with unknown crc (should not happen)
   const char *note = NULL;
@@ -1169,6 +1337,10 @@ void layout_poll() {
     memcpy(todo, pend, sizeof pend);
     pend_n = 0;
     for (uint8_t i = 0; i < n; i++) run_action(todo[i].e, todo[i].g);
+  }
+  if (session.take_pictures_changed() && active && !L.pages[cur].is_main) { // rebuild the page so it picks up the new picture
+    lv_obj_t *act = lv_scr_act();
+    if (act == scr_c[0] || act == scr_c[1]) lv_scr_load(prepare_page(cur));
   }
   if (!session.take_changed()) return;
   if (!file_exists()) {

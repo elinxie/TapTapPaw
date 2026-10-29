@@ -462,7 +462,7 @@ size_t ack_encode(const Ack &a, uint8_t *o) {
   return ACK_FRAME_BYTES;
 }
 
-Ack Session::make(uint8_t cmd, uint8_t status, uint8_t detail) {
+Ack Session::make(uint8_t cmd, uint8_t status, uint8_t detail, bool own_crc, uint32_t crc) {
   Ack a;
   a.cmd = cmd;
   a.status = status;
@@ -471,7 +471,7 @@ Ack Session::make(uint8_t cmd, uint8_t status, uint8_t detail) {
   a.seq = next_seq;
   size_t kb = st.free_bytes() / 1024;
   a.free_kb = (uint16_t)(kb > 65535 ? 65535 : kb);
-  a.crc = st.stored_crc();
+  a.crc = own_crc ? crc : st.stored_crc();
   return a;
 }
 
@@ -489,8 +489,17 @@ Ack Session::handle(uint8_t id, const uint8_t *p, uint8_t n) {
     case PKT_CHUNK: return do_chunk(p, n);
     case PKT_END: return n == 0 ? do_end() : make(id, ST_BAD_PKT);
     case PKT_ABORT: return n == 0 ? do_abort() : make(id, ST_BAD_PKT);
-    case PKT_QUERY: return make(id, ST_OK, FEATURE_LEVEL); // detail = feature level
+    case PKT_QUERY: // detail = feature level; with a slot byte the crc is that picture's
+      if (n == 1 && p[0] < PICTURE_SLOTS) return make(id, ST_OK, FEATURE_LEVEL, true, st.picture_crc(p[0]));
+      return n == 0 ? make(id, ST_OK, FEATURE_LEVEL) : make(id, ST_BAD_PKT);
     case PKT_RESET:
+      if (n == 1 && p[0] < PICTURE_SLOTS) { // delete one picture
+        if (is_open && kind == KIND_PICTURE && slot == p[0]) drop();
+        if (!st.picture_remove(p[0])) return make(id, ST_IO);
+        st.set_picture_crc(p[0], 0);
+        pics_changed = true;
+        return make(id, ST_OK, 0, true, 0);
+      }
       if (n != 0) return make(id, ST_BAD_PKT);
       drop();
       if (!st.final_remove()) return make(id, ST_IO);
@@ -505,14 +514,17 @@ Ack Session::do_begin(const uint8_t *p, uint8_t n) {
   if (n != 11) return make(PKT_BEGIN, ST_BAD_PKT);
   uint8_t k = p[0], sl = p[1], v = p[2];
   uint32_t tot = le32(p + 3), crc = le32(p + 7);
-  if (k != 0) return make(PKT_BEGIN, k == 1 ? ST_UNSUPPORTED : ST_BAD_PKT);
+  if (k > KIND_ART) return make(PKT_BEGIN, ST_BAD_PKT);
+  if (k == KIND_PICTURE && sl >= PICTURE_SLOTS) return make(PKT_BEGIN, ST_BAD_PKT);
   if (v != SCHEMA_VERSION) return make(PKT_BEGIN, ST_INVALID, E_VERSION);
   if (tot == 0) return make(PKT_BEGIN, ST_BAD_PKT);
-  if (tot > MAX_LAYOUT_BYTES) return make(PKT_BEGIN, ST_TOO_BIG, E_TOO_BIG);
+  uint32_t cap = k == KIND_LAYOUT ? MAX_LAYOUT_BYTES : k == KIND_PICTURE ? MAX_PICTURE_BYTES : MAX_ART_BYTES;
+  if (tot > cap) return make(PKT_BEGIN, ST_TOO_BIG, k == KIND_LAYOUT ? E_TOO_BIG : 0);
   if (is_open && kind == k && slot == sl && ver == v && total == tot && want_crc == crc) return make(PKT_BEGIN, ST_OK); // resume: ack carries next_seq
   drop();
-  if (st.free_bytes() < (size_t)tot + 1024) return make(PKT_BEGIN, ST_NO_SPACE);
-  if (!st.tmp_open()) return make(PKT_BEGIN, ST_IO);
+  // album art lives in RAM. A replaced picture keeps its old file until the new one is complete, so both must fit.
+  if (k != KIND_ART && st.free_bytes() < (size_t)tot + 8192) return make(PKT_BEGIN, ST_NO_SPACE); // keep 8 KB for LittleFS itself
+  if (!st.tmp_open(k, sl)) return make(PKT_BEGIN, ST_IO);
   is_open = true;
   kind = k;
   slot = sl;
@@ -560,6 +572,7 @@ Ack Session::do_end() {
     drop();
     return make(PKT_END, ST_CRC);
   }
+  if (kind != KIND_LAYOUT) return end_picture();
   uint8_t *buf = new (std::nothrow) uint8_t[total + 1];
   if (!buf) {
     drop();
@@ -590,7 +603,7 @@ Ack Session::do_end() {
     drop();
     return make(PKT_END, ST_INVALID, (uint8_t)e);
   }
-  if (!st.tmp_commit()) {
+  if (!st.tmp_commit(KIND_LAYOUT, 0)) {
     drop();
     return make(PKT_END, ST_IO);
   }
@@ -600,6 +613,53 @@ Ack Session::do_end() {
   next_seq = 0;
   changed = true;
   return make(PKT_END, ST_OK);
+}
+
+// Pictures are too big to read back into RAM: stream them back for the crc and check the format's markers.
+Ack Session::end_picture() {
+  uint8_t head[22] = {0}, tail[2] = {0};
+  uint32_t crc = 0;
+  size_t n = 0;
+  if (!st.tmp_scan(crc, n, head, sizeof head, tail) || n != total) {
+    drop();
+    return make(PKT_END, ST_IO);
+  }
+  if (crc != want_crc) {
+    drop();
+    return make(PKT_END, ST_CRC);
+  }
+  bool ok;
+  if (kind == KIND_PICTURE) { // LVGL SJPG: "_SJPG__\0V1.00\0", width u16, height u16, splits u16, split height u16
+    uint16_t w = (uint16_t)(head[14] | (head[15] << 8)), h = (uint16_t)(head[16] | (head[17] << 8)), parts = (uint16_t)(head[18] | (head[19] << 8));
+    ok = n > 22 && memcmp(head, "_SJPG__", 7) == 0 && w >= 1 && w <= SCREEN_W && h >= 1 && h <= SCREEN_H && parts >= 1;
+  } else { // plain baseline JPEG
+    ok = n > 4 && head[0] == 0xFF && head[1] == 0xD8 && tail[0] == 0xFF && tail[1] == 0xD9;
+  }
+  if (!ok) {
+    drop();
+    return make(PKT_END, ST_INVALID);
+  }
+  if (!st.tmp_commit(kind, slot)) {
+    drop();
+    return make(PKT_END, ST_IO);
+  }
+  if (!st.picture_check(kind, slot)) { // stored, but the board cannot decode it: remove it again
+    if (kind == KIND_PICTURE) {
+      st.picture_remove(slot);
+      st.set_picture_crc(slot, 0);
+    }
+    is_open = false;
+    received = 0;
+    next_seq = 0;
+    pics_changed = true;
+    return make(PKT_END, ST_INVALID, 1);
+  }
+  if (kind == KIND_PICTURE) st.set_picture_crc(slot, want_crc);
+  is_open = false;
+  received = 0;
+  next_seq = 0;
+  pics_changed = true;
+  return make(PKT_END, ST_OK, 0, true, want_crc);
 }
 
 Ack Session::do_abort() {
