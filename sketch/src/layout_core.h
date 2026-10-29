@@ -193,6 +193,8 @@ class Session {
   Storage &st;
   bool is_open = false;
   bool changed = false, pics_changed = false;
+  bool free_known = false;
+  size_t free_cache = 0;
   uint8_t kind = 0, slot = 0, ver = 0;
   uint32_t total = 0, want_crc = 0, run_crc = 0, received = 0;
   uint16_t next_seq = 0;

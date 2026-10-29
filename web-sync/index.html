@@ -458,8 +458,53 @@ function layoutChunkCount(n) { return Math.ceil(n / LAYOUT.CHUNK); }
 function layoutChunkPacket(seq, bytes) { const d = bytes.subarray(seq * LAYOUT.CHUNK, (seq + 1) * LAYOUT.CHUNK); return pkt(0x0C, [seq & 0xFF, seq >> 8, ...d]); }
 const layoutEndPacket = () => pkt(0x0D, []);
 const layoutAbortPacket = () => pkt(0x0E, []);
-const layoutQueryPacket = () => pkt(0x0F, []);
-const layoutResetPacket = () => pkt(0x11, []);
+const layoutQueryPacket = (slot) => pkt(0x0F, slot === undefined ? [] : [slot]); // with a slot: that picture's crc
+const layoutResetPacket = (slot) => pkt(0x11, slot === undefined ? [] : [slot]); // with a slot: delete that picture only
+
+// ---- pictures (upload kind 1 = SJPG in a board slot, kind 2 = album art JPEG in RAM). See docs/WIDGETS.md ----
+const PIC = { SLOTS: 8, W: 240, H: 320, MAX_BYTES: 65536, ART: 96, ART_MAX: 12288, STRIP: 16 };
+// LVGL's SJPG: "_SJPG__\0" "V1.00\0", width, height, number of strips, strip height (u16 LE), each strip's size (u16), then the
+// strips, each a baseline JPEG of 16 rows (the last may be shorter). The board decodes one strip at a time.
+function sjpgAssemble(w, h, strips) {
+  const head = new Uint8Array(22 + 2 * strips.length), dv = new DataView(head.buffer);
+  head.set(new TextEncoder().encode('_SJPG__'), 0); head.set(new TextEncoder().encode('V1.00'), 8);
+  dv.setUint16(14, w, true); dv.setUint16(16, h, true); dv.setUint16(18, strips.length, true); dv.setUint16(20, PIC.STRIP, true);
+  strips.forEach((st, i) => { if (st.length > 65535) throw new Error('strip too big'); dv.setUint16(22 + 2 * i, st.length, true); });
+  const out = new Uint8Array(head.length + strips.reduce((n, st) => n + st.length, 0));
+  out.set(head, 0); let o = head.length;
+  for (const st of strips) { out.set(st, o); o += st.length; }
+  return out;
+}
+// Drop APP1..APP15 segments (Chrome writes an ICC colour profile, ~480 bytes, into every JPEG): the board ignores them and an
+// SJPG has one JPEG per 16-row strip, so they would cost ~10 KB on a full-screen picture. Everything else is kept as is.
+function jpegStripApp(j) {
+  if (j.length < 4 || j[0] !== 0xFF || j[1] !== 0xD8) return j;
+  const keep = [j.subarray(0, 2)]; let i = 2;
+  while (i + 4 <= j.length && j[i] === 0xFF) {
+    const m = j[i + 1], len = (j[i + 2] << 8) | j[i + 3];
+    if (m === 0xDA) break; // start of scan: the rest is image data
+    if (!(m >= 0xE1 && m <= 0xEF)) keep.push(j.subarray(i, i + 2 + len));
+    i += 2 + len;
+  }
+  keep.push(j.subarray(i));
+  const out = new Uint8Array(keep.reduce((n, k) => n + k.length, 0)); let o = 0;
+  for (const k of keep) { out.set(k, o); o += k.length; }
+  return out;
+}
+function sjpgInfo(u) {
+  if (!u || u.length < 22 || new TextDecoder().decode(u.subarray(0, 7)) !== '_SJPG__') return null;
+  const dv = new DataView(u.buffer, u.byteOffset, u.byteLength);
+  return { w: dv.getUint16(14, true), h: dv.getUint16(16, true), strips: dv.getUint16(18, true), stripH: dv.getUint16(20, true) };
+}
+// slots a layout refers to: picture widgets and picture backgrounds, with the size each must be encoded at
+function picturesUsed(lay) {
+  const m = new Map();
+  for (const p of lay.pg) {
+    if (p.bg && p.bg.t === 'i') m.set(p.bg.i, { w: PIC.W, h: PIC.H });
+    for (const w of (p.w || [])) if (w.t === 'pc') m.set(w.i, { w: w.w, h: w.h });
+  }
+  return m;
+}
 
 // Board -> host ack 0x10: [FF][10][12][cmd][status][detail][flags][seq u16][free_kb u16][crc u32]. Returns null if u8 is not a complete ack frame.
 function parseLayoutAck(u) {
@@ -471,12 +516,14 @@ function parseLayoutAck(u) {
 }
 
 // Upload driver: stop-and-wait with retry and resume. io = { send(u8), ack(cmd, ms) -> Promise<ack|null>, onProgress?(done,total) }
+// opts.kind / opts.slot: 0 layout (default), 1 picture into slot 0..7, 2 album art. One chunk in flight: measured on the board,
+// more than one loses bytes while it writes flash (the end checksum catches it, but the upload fails).
 async function uploadLayoutBytes(bytes, io, opts = {}) {
-  const tries = opts.tries || 3, ms = opts.timeoutMs || 1500;
-  const call = async (packet, cmd) => { for (let t = 0; t < tries; t++) { io.send(packet); const a = await io.ack(cmd, ms); if (a) return a; } return null; };
+  const tries = opts.tries || 3, ms = opts.timeoutMs || 1500, kind = opts.kind || 0, slot = opts.slot || 0;
+  const call = async (packet, cmd, wait = ms) => { for (let t = 0; t < tries; t++) { io.send(packet); const a = await io.ack(cmd, wait); if (a) return a; } return null; };
   const fail = (stage, ack) => ({ ok: false, stage, ack, message: ack ? (stage + ': ' + ack.statusName + (ack.detailName ? ' (' + ack.detailName + ')' : '')) : (stage + ': no answer from the board') });
   const total = layoutChunkCount(bytes.length);
-  let a = await call(layoutBeginPacket(bytes), 0x0B);
+  let a = await call(layoutBeginPacket(bytes, kind, slot), 0x0B);
   if (!a || a.status !== 0) return fail('begin', a);
   let seq = a.seq; // 0, or where an interrupted upload of the same layout stopped
   let guard = total * 4 + 8;
@@ -489,8 +536,12 @@ async function uploadLayoutBytes(bytes, io, opts = {}) {
     if (io.onProgress) io.onProgress(Math.min(seq, total), total);
   }
   if (seq < total) return fail('chunk', null);
-  a = await call(layoutEndPacket(), 0x0D);
-  if (!a || a.status !== 0) return fail('end', a);
+  a = await call(layoutEndPacket(), 0x0D, kind ? 6000 : ms); // pictures: the board test-decodes before it answers
+  if (!a || a.status !== 0) {
+    if (a && kind && a.status === 8) return { ok: false, stage: 'end', ack: a, message: 'the board cannot decode this picture' };
+    return fail('end', a);
+  }
+  if (kind) return a.crc === crc32(bytes) ? { ok: true, ack: a, message: 'picture stored and verified' } : { ok: false, stage: 'verify', ack: a, message: 'verify: checksum read back from the board does not match' };
   const q = await call(layoutQueryPacket(), 0x0F); // verify: the board reports the crc of the layout it stored
   if (!q || q.crc !== crc32(bytes)) return { ok: false, stage: 'verify', ack: q, message: 'verify: checksum read back from the board does not match' };
   return { ok: true, ack: q, message: 'layout stored and verified' };
@@ -518,6 +569,8 @@ const WIDGET_DEFS = {
   bt: { name: 'Button', w: 104, h: 40, o: ['s', 'e', 'z', 'c', 'r'], def: { e: 1, s: 'Tap' } },
   sp: { name: 'Spotify controls', w: 180, h: 44, o: ['c'] },
   rm: { name: 'Reminder', w: 180, h: 32, o: ['k', 'p', 'z'], def: { p: 30 } },
+  pc: { name: 'Picture', w: 96, h: 96, o: ['pic'] }, // your image, encoded at the widget's size when sent
+  aa: { name: 'Album art', w: 96, h: 96, fixed: true, o: [] }, // current Spotify cover, sent by this page
 };
 // what the tappable widgets do on the board, shown in the property panel
 const WIDGET_HINT = {
@@ -527,6 +580,8 @@ const WIDGET_HINT = {
   dt: 'The date comes from the web page (sent every minute). The desktop app does not send it.',
   cd: 'Counts down to this time of day, then to the same time the next day.',
   sp: 'Previous / play-pause / next. Needs the web page connected and signed in to Spotify (Premium).',
+  pc: 'Resize freely: the picture is cropped to fill the box and converted when you press Send. Each picture uses one of the board\'s 8 picture slots.',
+  aa: 'Shows the cover of what Spotify is playing. This page sends it when the track changes (signed in to Spotify, page connected).',
   ct: 'Taps along with the board keys, button widgets, the desktop app and Bluetooth keys. Blinks, falls asleep, chases the mouse paw.',
 };
 // Bluetooth keys (button action "Bluetooth: key"): HID usage ids and modifier bits; arg g = (modifiers << 8) | usage
@@ -1026,7 +1081,10 @@ async function spPoll() {
     if (r.status === 403) { log('Spotify answered 403: the account must be on the app\'s allowlist (Spotify dashboard, User Management)'); return; }
     if (r.status === 429) { log('Spotify rate limit, slowing down'); spBusy = true; await sleep(10000); return; }
     if (r.status !== 200 && r.status !== 204) { log('Spotify answered HTTP ' + r.status); return; }
-    const info = spotifyInfo(r.status === 204 ? null : await r.json());
+    const j = r.status === 204 ? null : await r.json();
+    const info = spotifyInfo(j);
+    const imgs = j && j.item && ((j.item.album && j.item.album.images) || j.item.images); // track cover or podcast episode art
+    if (imgs && imgs.length) { const pick = imgs.filter((i) => (i.width || 300) >= PIC.ART).pop() || imgs[0]; sendAlbumArt(pick.url); } // smallest that is at least 96 px
     $('media').value = info.state;
     spPlaying = info.state === 1;
     const key = info.title + ' ' + info.artist;
@@ -1152,6 +1210,15 @@ function drawWidget(w, s, box) {
       });
       break;
     }
+    case 'pc':
+      box.style.background = pics[w.i] ? 'url(' + pics[w.i].orig + ') center/cover no-repeat' : 'rgba(0,0,0,.31)';
+      if (!pics[w.i]) { box.style.cssText += ';display:flex;align-items:center;justify-content:center;color:#A99BB3;font:12px system-ui'; box.textContent = 'no picture'; }
+      break;
+    case 'aa': {
+      box.style.cssText += ';border-radius:6px;background:' + (lastArt ? 'url(' + lastArt + ') center/cover' : 'linear-gradient(135deg,#3a2a55,#1b1620)');
+      if (!lastArt) { box.style.cssText += ';display:flex;align-items:center;justify-content:center;color:#A99BB3;font:24px system-ui'; box.textContent = '\u266B'; }
+      break;
+    }
     case 'ct': { // same parts and offsets as the board (layout.cpp W_TCAT); the paw taps once a second here
       box.style.background = 'url(' + PREVIEW_ART.cat + ') 20px 0/200px 132px no-repeat';
       const up = s.s % 2 === 0;
@@ -1178,6 +1245,7 @@ function pageBg(p, s) {
   if (bg.t === 'b') return '#000 url(' + PREVIEW_ART['wall' + bg.i] + ') 0 0/240px 320px';
   if (bg.t === 's') return bg.c;
   if (bg.t === 'g') return 'linear-gradient(' + bg.c + ',' + bg.d + ')';
+  if (bg.t === 'i' && pics[bg.i]) return '#000 url(' + pics[bg.i].orig + ') center/cover no-repeat';
   return '#000 url(' + PREVIEW_ART['wall' + (s.group < 6 ? s.group : 0)] + ') 0 0/240px 320px'; // weather-driven: the current group
 }
 function renderStage() {
@@ -1220,7 +1288,7 @@ function renderTabs() {
     m.onclick = () => { const r = ed.addMainPage(); if (r.ok) { curPage = 0; selId = null; renderAll(); } else flash(r.why); };
   }
 }
-const BG_NAMES = { w: 'Follows the weather (default)', b: 'Built-in wallpaper', s: 'Solid color', g: 'Gradient' };
+const BG_NAMES = { w: 'Follows the weather (default)', b: 'Built-in wallpaper', s: 'Solid color', g: 'Gradient', i: 'Picture (yours)' };
 function full6(c) { if (!c) return '#000000'; return c.length === 4 ? '#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3] : c.toLowerCase(); }
 function renderPagePanel() {
   const st = ed.state, p = st.pages[curPage], box = $('bPage');
@@ -1233,6 +1301,7 @@ function renderPagePanel() {
     if (bg.t === 's' || bg.t === 'g') h += '<div class="row"><label>' + (bg.t === 'g' ? 'Top' : 'Color') + '</label><input type="color" id="pBgC" value="' + full6(bg.c) + '">' +
       (bg.t === 'g' ? ' <label style="min-width:0">Bottom</label> <input type="color" id="pBgD" value="' + full6(bg.d) + '">' : '') + '</div>';
     if (bg.t === 'w') h += '<div class="mute">Like today: the board picks one of its 6 wallpapers from the weather.</div>';
+    if (bg.t === 'i') h += '<div class="row"><button class="ghost" id="pBgPic">' + (pics[bg.i] ? 'Choose another picture' : 'Choose a picture') + '</button> <span class="mute">' + picLabel(bg.i) + '</span></div>';
   }
   const rots = [[0, 'off'], [5, 'every 5 s'], [10, 'every 10 s'], [15, 'every 15 s'], [30, 'every 30 s'], [60, 'every minute']];
   if (!rots.some(([v]) => v === st.rot)) rots.push([st.rot, 'every ' + st.rot + ' s']);
@@ -1244,9 +1313,11 @@ function renderPagePanel() {
   if ($('pBgT')) $('pBgT').onchange = (e) => {
     const t = e.target.value, o = { t };
     if (t === 'b') o.i = 5; if (t === 's') o.c = '#1b1620'; if (t === 'g') { o.c = '#1b1620'; o.d = '#3a2a55'; }
+    if (t === 'i') { pickPicture((slot) => { ed.setBg(curPage, { t: 'i', i: slot }); renderPagePanel(); }, () => renderPagePanel()); return; }
     ed.setBg(curPage, o); renderPagePanel();
   };
   if ($('pBgI')) $('pBgI').onchange = (e) => ed.setBg(curPage, { t: 'b', i: +e.target.value });
+  if ($('pBgPic')) $('pBgPic').onclick = () => { const cur = (ed.state.pages[curPage].bg || {}).i; pickPicture((slot) => { ed.setBg(curPage, { t: 'i', i: slot }); renderAll(); }, null, cur); };
   if ($('pBgC')) $('pBgC').onchange = (e) => { const o = bgOf(); o.c = e.target.value; ed.setBg(curPage, o); };
   if ($('pBgD')) $('pBgD').onchange = (e) => { const o = bgOf(); o.d = e.target.value; ed.setBg(curPage, o); };
   $('pLeft').disabled = curPage === 0; $('pRight').disabled = curPage === st.pages.length - 1; $('pDel').disabled = st.pages.length <= 1;
@@ -1290,6 +1361,7 @@ function renderProps(force) {
     if (k === 'p' && w.t === 'cd') h += opt('Count to', '<input type="time" id="pTime" value="' + two(Math.floor((w.p | 0) / 60)) + ':' + two((w.p | 0) % 60) + '">');
     else if (k === 'p') h += opt(w.t === 'pm' ? 'Focus (min)' : 'Every (min)', '<input type="number" data-k="p" min="' + (w.t === 'pm' ? 1 : 5) + '" max="' + (w.t === 'pm' ? 180 : 240) + '">');
     if (k === 'b') h += opt('Break (min)', '<input type="number" data-k="b" min="1" max="60">');
+    if (k === 'pic') h += '<div class="row"><button class="ghost" id="pPic">' + (pics[w.i] ? 'Choose another picture' : 'Choose a picture') + '</button> <span class="mute">' + picLabel(w.i) + '</span></div>';
     if (k === 'e') {
       h += opt('Action', '<select data-k="e">' + BTN_ACTIONS.map((a, i) => '<option value="' + i + '">' + a.name + (a.ble ? ' (Bluetooth build)' : a.page ? ' (web page)' : '') + '</option>').join('') + '</select>');
       const a = BTN_ACTIONS[w.e | 0];
@@ -1327,6 +1399,7 @@ function renderProps(force) {
     else if (k === 'e') i.onchange = () => { ed.begin(); ed.setProp(selId, 'e', +i.value); const a = BTN_ACTIONS[+i.value]; ed.setProp(selId, 'g', a.arg === 'key' ? 0x0804 /* Cmd+A */ : 0); ed.end(); renderProps(true); };
     else i.onchange = () => { ed.begin(); ed.setProp(selId, k, +i.value); ed.end(); };
   });
+  if ($('pPic')) $('pPic').onclick = () => pickPicture((slot) => { ed.begin(); ed.setProp(selId, 'i', slot); ed.end(); renderProps(true); }, null, w.i);
   if ($('pTime')) $('pTime').onchange = (e) => { const [hh, mm] = e.target.value.split(':').map(Number); if (isFinite(hh) && isFinite(mm)) { ed.begin(); ed.setProp(selId, 'p', hh * 60 + mm); ed.end(); } };
   const setHid = () => { let g = +$('hidKey').value; box.querySelectorAll('.hidMod').forEach((c) => { if (c.checked) g |= (+c.value) << 8; }); ed.begin(); ed.setProp(selId, 'g', g); ed.end(); renderProps(true); };
   if ($('hidKey')) { $('hidKey').onchange = setHid; box.querySelectorAll('.hidMod').forEach((c) => (c.onchange = setHid)); }
@@ -1335,7 +1408,16 @@ function renderProps(force) {
   $('pDup').onclick = dupSel; $('pRm').onclick = delSel;
   $('zF').onclick = () => ed.z(selId, 'front'); $('zU').onclick = () => ed.z(selId, 'up'); $('zD').onclick = () => ed.z(selId, 'down'); $('zB').onclick = () => ed.z(selId, 'back');
 }
-function dupSel() { if (!selId) return; const r = ed.duplicate(selId); if (r.ok) { selId = r.id; renderAll(); } else flash(r.why); }
+function dupSel() {
+  if (!selId) return;
+  const src = ed.find(selId).w;
+  let slot = null;
+  if (src.t === 'pc') { slot = freeSlot(); if (slot === null) { flash('all 8 picture slots are in use'); return; } if (pics[src.i]) { pics[slot] = { name: pics[src.i].name, orig: pics[src.i].orig }; savePics(); } }
+  const r = ed.duplicate(selId);
+  if (!r.ok) { flash(r.why); return; }
+  if (slot !== null) { ed.begin(); ed.setProp(r.id, 'i', slot); ed.end(); }
+  selId = r.id; renderAll();
+}
 function delSel() { if (!selId) return; ed.remove(selId); selId = null; renderAll(); }
 
 function renderPalette() {
@@ -1344,14 +1426,21 @@ function renderPalette() {
   for (const t of Object.keys(WIDGET_DEFS)) {
     const b = el('button', '', p); b.textContent = '+ ' + WIDGET_DEFS[t].name; b.disabled = main;
     b.title = main ? 'The original screen page cannot hold widgets: pick or add another page' : 'Add to page ' + (curPage + 1);
-    b.onclick = () => { const r = ed.addWidget(curPage, t); if (r.ok) { selId = r.id; renderAll(); } else flash(r.why); };
+    b.onclick = () => {
+      if (t === 'pc') { // pick the image first, then place the widget with its slot
+        pickPicture((slot) => { const r = ed.addWidget(curPage, 'pc'); if (!r.ok) { flash(r.why); return; } ed.begin(); ed.setProp(r.id, 'i', slot); ed.end(); selId = r.id; renderAll(); });
+        return;
+      }
+      const r = ed.addWidget(curPage, t); if (r.ok) { selId = r.id; renderAll(); } else flash(r.why);
+    };
   }
 }
 function renderMeter() {
   const out = ed.toJSON(), st = ed.state;
   const size = out.ok ? out.size : new TextEncoder().encode(out.text).length;
   $('bMeter').innerHTML = ['<b>' + size + '</b> / ' + LAYOUT.MAX_BYTES + ' bytes', '<b>' + ed.total() + '</b> / ' + LAYOUT.MAX_WIDGETS_TOTAL + ' widgets',
-    '<b>' + st.pages.length + '</b> / ' + LAYOUT.MAX_PAGES + ' pages', 'label text <b>' + ed.textBytes() + '</b> / ' + LAYOUT.MAX_TEXT_POOL].join(' &middot; ') +
+    '<b>' + st.pages.length + '</b> / ' + LAYOUT.MAX_PAGES + ' pages', 'label text <b>' + ed.textBytes() + '</b> / ' + LAYOUT.MAX_TEXT_POOL,
+    'pictures <b>' + picturesUsed(ed.toLayout()).size + '</b> / ' + PIC.SLOTS + (boardFreeKb !== null ? ' (board: ' + boardFreeKb + ' KB free)' : '')].join(' &middot; ') +
     ' &middot; ' + (out.ok ? '<span class="ok">ready to send</span>' : '<span class="bad">not valid: ' + esc(out.err) + '</span>');
   $('bSend').disabled = !out.ok || sending;
 }
@@ -1461,6 +1550,114 @@ $('bDelSaved').onclick = () => {
   delete list[n]; store('layouts', JSON.stringify(list)); renderSaved();
 };
 
+// ---- pictures: kept in this browser (localStorage "ttp_pics"), encoded for the board when sent ----
+let pics = {}, boardFreeKb = null, lastArt = null, lastArtUrl = '', artBusy = false;
+try { pics = JSON.parse(load('pics') || '{}') || {}; } catch (e) { pics = {}; }
+function savePics() { try { localStorage.setItem('ttp_pics', JSON.stringify(pics)); } catch (e) { flash('the browser has no room left to keep pictures: delete some saved layouts or pictures'); } }
+function picLabel(slot) { const p = pics[slot]; return p ? esc(p.name || 'picture') + (p.enc ? ', ' + Math.ceil(p.enc.size / 1024) + ' KB on the board' : '') : 'none chosen'; }
+function freeSlot(except) {
+  const used = picturesUsed(ed.toLayout());
+  for (let i = 0; i < PIC.SLOTS; i++) if (!used.has(i) && !pics[i]) return i;
+  for (let i = 0; i < PIC.SLOTS; i++) if (!used.has(i) && i !== except) { delete pics[i]; return i; } // reuse a picture nothing shows
+  return null;
+}
+function readImage(file) {
+  return new Promise((resolve, reject) => { const u = URL.createObjectURL(file), im = new Image(); im.onload = () => { URL.revokeObjectURL(u); resolve(im); }; im.onerror = () => { URL.revokeObjectURL(u); reject(new Error('not an image this browser can read')); }; im.src = u; });
+}
+function coverDraw(ctx, im, w, h) { // fill w x h, crop what sticks out (like CSS background-size: cover)
+  const sc = Math.max(w / im.width, h / im.height), dw = im.width * sc, dh = im.height * sc;
+  ctx.imageSmoothingQuality = 'high'; ctx.drawImage(im, (w - dw) / 2, (h - dh) / 2, dw, dh);
+}
+// pick a file, keep a copy (longest side 480 px) as the source for every size it is later encoded at
+function pickPicture(done, cancelled, reuseSlot) {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+  inp.onchange = async () => {
+    const f = inp.files[0]; if (!f) { if (cancelled) cancelled(); return; }
+    try {
+      const im = await readImage(f), sc = Math.min(1, 480 / Math.max(im.width, im.height));
+      const c = document.createElement('canvas'); c.width = Math.round(im.width * sc); c.height = Math.round(im.height * sc);
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      const slot = reuseSlot !== undefined && reuseSlot !== null ? reuseSlot : freeSlot();
+      if (slot === null) { flash('all 8 picture slots are in use: remove a picture widget or background first'); if (cancelled) cancelled(); return; }
+      pics[slot] = { name: f.name.slice(0, 40), orig: c.toDataURL('image/jpeg', 0.85) };
+      savePics(); done(slot);
+    } catch (e) { flash('could not read the picture: ' + e.message); if (cancelled) cancelled(); }
+  };
+  inp.click();
+}
+async function jpegOf(canvas, q) { const b = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', q)); return new Uint8Array(await b.arrayBuffer()); }
+// Encode slot's picture at w x h as SJPG (16-row baseline JPEG strips), lowering quality until it fits the budget
+async function encodePicture(slot, w, h) {
+  const p = pics[slot]; if (!p) throw new Error('picture slot ' + slot + ' is empty');
+  if (p.enc && p.enc.w === w && p.enc.h === h) return Uint8Array.from(atob(p.enc.b64), (c) => c.charCodeAt(0));
+  const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('stored picture is damaged')); i.src = p.orig; });
+  const full = document.createElement('canvas'); full.width = w; full.height = h;
+  const fctx = full.getContext('2d'); fctx.fillStyle = '#000'; fctx.fillRect(0, 0, w, h); coverDraw(fctx, im, w, h);
+  const budget = Math.max(6000, Math.round(46000 * (w * h) / (PIC.W * PIC.H))); // a full screen aims at ~45 KB
+  let bytes = null;
+  for (const q of [0.82, 0.72, 0.62, 0.52, 0.42, 0.32]) {
+    const strips = [];
+    for (let y = 0; y < h; y += PIC.STRIP) {
+      const sh = Math.min(PIC.STRIP, h - y), c = document.createElement('canvas'); c.width = w; c.height = sh;
+      c.getContext('2d').drawImage(full, 0, y, w, sh, 0, 0, w, sh);
+      strips.push(jpegStripApp(await jpegOf(c, q)));
+    }
+    bytes = sjpgAssemble(w, h, strips);
+    if (bytes.length <= budget) break;
+  }
+  if (bytes.length > PIC.MAX_BYTES) throw new Error('picture is still ' + Math.ceil(bytes.length / 1024) + ' KB after compression (max 64 KB)');
+  let bin = ''; for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  p.enc = { w, h, size: bytes.length, crc: crc32(bytes), b64: btoa(bin) }; savePics();
+  return bytes;
+}
+// Bring the board's pictures in line with the layout: upload changed ones, delete ones nothing shows
+async function syncPictures(lay, io, progress) {
+  const used = picturesUsed(lay);
+  for (const [slot, sz] of used) if (!pics[slot]) return { ok: false, message: 'picture ' + (slot + 1) + ' has no image chosen' };
+  let need = 0; const work = [];
+  for (const [slot, sz] of used) {
+    progress('preparing picture ' + (work.length + 1) + ' of ' + used.size);
+    const bytes = await encodePicture(slot, sz.w, sz.h);
+    io.send(layoutQueryPacket(slot)); const q = await io.ack(0x0F, 1500);
+    if (!q) return { ok: false, message: ackText(null) };
+    boardFreeKb = q.freeKb;
+    if (q.crc !== crc32(bytes)) { work.push([slot, bytes]); need += bytes.length; }
+  }
+  for (let slot = 0; slot < PIC.SLOTS; slot++) { // free the board's unused slots first, so new pictures have room
+    if (used.has(slot)) continue;
+    io.send(layoutQueryPacket(slot)); const q = await io.ack(0x0F, 1500);
+    if (q && q.crc !== 0) { io.send(layoutResetPacket(slot)); await io.ack(0x11, 2000); log('removed unused picture ' + (slot + 1) + ' from the board'); }
+  }
+  io.send(layoutQueryPacket()); const q = await io.ack(0x0F, 1500); if (q) boardFreeKb = q.freeKb;
+  if (q && need / 1024 > q.freeKb - 8) return { ok: false, message: 'the pictures need ' + Math.ceil(need / 1024) + ' KB but the board has ' + q.freeKb + ' KB free (it keeps 8 KB spare). Use fewer or smaller pictures.' };
+  let n = 0;
+  for (const [slot, bytes] of work) {
+    n++;
+    const r = await uploadLayoutBytes(bytes, Object.assign({}, io, { onProgress: (d, t) => progress('picture ' + n + ' of ' + work.length + ': ' + Math.round(100 * d / t) + '%', d / t) }), { kind: 1, slot, timeoutMs: 1500, tries: 3 });
+    if (!r.ok) return { ok: false, message: 'picture ' + (slot + 1) + ': ' + r.message };
+    log('picture ' + (slot + 1) + ' sent, ' + bytes.length + ' bytes');
+  }
+  return { ok: true, sent: work.length };
+}
+// Album art: when Spotify's track changes and the layout shows album art, send the cover (96x96 JPEG, board RAM only)
+async function sendAlbumArt(url) {
+  if (!url || url === lastArtUrl || artBusy || sending || !active || !picturesOrArtShown()) return;
+  artBusy = true; lastArtUrl = url;
+  try {
+    const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status); // i.scdn.co allows reading (CORS *)
+    const im = await createImageBitmap(await r.blob());
+    const c = document.createElement('canvas'); c.width = c.height = PIC.ART; coverDraw(c.getContext('2d'), im, PIC.ART, PIC.ART);
+    let bytes = null; for (const q of [0.8, 0.65, 0.5]) { bytes = jpegStripApp(await jpegOf(c, q)); if (bytes.length <= PIC.ART_MAX) break; }
+    lastArt = c.toDataURL('image/jpeg', 0.8); renderStage();
+    if (bytes.length > PIC.ART_MAX) throw new Error('cover too big');
+    const res = await uploadLayoutBytes(bytes, boardIo(), { kind: 2, timeoutMs: 1500, tries: 2 });
+    log(res.ok ? 'album art sent (' + bytes.length + ' bytes)' : 'album art not sent: ' + res.message);
+  } catch (e) { log('album art: ' + e.message); }
+  artBusy = false;
+}
+// for checking things from the browser console (and the automated page tests): window.ttpDebug
+window.ttpDebug = { get pics() { return pics; }, encodePicture, syncPictures, sendAlbumArt, editor: () => ed, boardIo };
+function picturesOrArtShown() { return ed.toLayout().pg.some((p) => (p.w || []).some((w) => w.t === 'aa')); }
 function layoutLevel(lay) { let n = 0; for (const p of lay.pg) for (const w of (p.w || [])) n = Math.max(n, WIDGET_LEVEL[w.t] || 0); for (const p of lay.pg) if (p.bg && p.bg.t === 'i') n = Math.max(n, 2); return n; }
 function newWidgetNames(lay, have) { const s = new Set(); for (const p of lay.pg) for (const w of (p.w || [])) if ((WIDGET_LEVEL[w.t] || 0) > have) s.add(WIDGET_DEFS[w.t] ? WIDGET_DEFS[w.t].name : w.t); return [...s].join(', ') || 'picture background'; }
 // ---- talking to the board: acks (0x10) arrive through feed() ----
@@ -1479,14 +1676,16 @@ function waitAck(cmd, ms) {
   });
 }
 // Dry run: a small simulated board, so the whole upload can be watched (and tried) without hardware
-const sim = { open: false, total: 0, crc: 0, data: [], stored: null, storedCrc: 0 };
+const sim = { open: false, total: 0, crc: 0, data: [], stored: null, storedCrc: 0, kind: 0, slot: 0, pics: {}, used: 0 };
 function simHandle(u) {
   const id = u[1], p = Array.from(u.subarray(3));
   const mk = (status, detail = 0) => ({ cmd: id, status, statusName: LAYOUT_STATUS[status], detail, detailName: status === 8 ? LAYOUT_ERRORS[detail] : '',
-    active: !!sim.stored, stored: !!sim.stored, safeMode: false, sessionOpen: sim.open, seq: Math.ceil(sim.data.length / LAYOUT.CHUNK), freeKb: 200, crc: sim.storedCrc });
+    active: !!sim.stored, stored: !!sim.stored, safeMode: false, sessionOpen: sim.open, seq: Math.ceil(sim.data.length / LAYOUT.CHUNK),
+    freeKb: 200 - Math.ceil(Object.values(sim.pics).reduce((n, b) => n + b.length, 0) / 1024), crc: sim.storedCrc });
   if (id === 0x0B) {
     const t = p[3] | (p[4] << 8) | (p[5] << 16), c = (p[7] | (p[8] << 8) | (p[9] << 16) | (p[10] << 24)) >>> 0;
-    if (!(sim.open && sim.total === t && sim.crc === c)) Object.assign(sim, { open: true, total: t, crc: c, data: [] });
+    if (p[0] > 2 || (p[0] === 1 && p[1] >= PIC.SLOTS)) return mk(1);
+    if (!(sim.open && sim.total === t && sim.crc === c && sim.kind === p[0] && sim.slot === p[1])) Object.assign(sim, { open: true, total: t, crc: c, data: [], kind: p[0], slot: p[1] });
     return mk(0);
   }
   if (id === 0x0C) {
@@ -1500,13 +1699,18 @@ function simHandle(u) {
     if (!sim.open) return mk(9);
     if (sim.data.length !== sim.total) return mk(10);
     sim.open = false;
-    const bytes = Uint8Array.from(sim.data), v = validateLayout(new TextDecoder().decode(bytes));
+    const bytes = Uint8Array.from(sim.data);
     if (crc32(bytes) !== sim.crc) return mk(4);
+    if (sim.kind === 1) { if (!sjpgInfo(bytes)) return mk(8, 1); sim.pics[sim.slot] = bytes; return Object.assign(mk(0), { crc: sim.crc }); }
+    if (sim.kind === 2) { if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return mk(8, 1); return Object.assign(mk(0), { crc: sim.crc }); }
+    const v = validateLayout(new TextDecoder().decode(bytes));
     if (!v.ok) return mk(8, v.code);
     sim.stored = bytes; sim.storedCrc = sim.crc; return mk(0);
   }
   if (id === 0x0E) { sim.open = false; sim.data = []; return mk(0); }
+  if (id === 0x11 && p.length === 1) { delete sim.pics[p[0]]; return Object.assign(mk(0), { crc: 0 }); }
   if (id === 0x11) { sim.stored = null; sim.storedCrc = 0; return mk(0); }
+  if (id === 0x0F && p.length === 1) return Object.assign(mk(0, 2), { crc: sim.pics[p[0]] ? crc32(sim.pics[p[0]]) : 0 });
   if (id === 0x0F) return mk(0, 2); // feature level 2
   return mk(0);
 }
@@ -1543,6 +1747,11 @@ $('bSend').onclick = async () => {
   setSend('sending ' + o.size + ' bytes' + (dry ? ' to the simulated board' : '') + '...');
   ackQueue.length = 0;
   try {
+    if (picturesUsed(ed.toLayout()).size || need > 0) { // pictures first, so the layout never points at a missing one for long
+      const pr = await syncPictures(ed.toLayout(), boardIo(), (msg, f) => { setSend(msg); if (f !== undefined) $('bProg').value = f; });
+      if (!pr.ok) { setSend('Not sent: ' + pr.message + '. The board keeps its previous layout.', 'bad'); sending = false; renderMeter(); return; }
+      $('bProg').value = 0;
+    }
     const io = Object.assign(boardIo(), { onProgress: (d, t) => { $('bProg').value = d / t; setSend('sending: chunk ' + d + ' of ' + t); } });
     const r = await uploadLayoutBytes(o.bytes, io, { timeoutMs: 1500, tries: 3 });
     if (r.ok) { $('bProg').value = 1; setSend((dry ? 'Dry run: simulated board stored it. ' : 'Sent and verified. ') + 'Board: ' + ackText(r.ack) + '.', 'ok'); log('layout ' + (dry ? '(dry run) ' : '') + 'sent and verified, ' + o.size + ' bytes, crc ' + crc32(o.bytes).toString(16).padStart(8, '0')); }
@@ -1556,6 +1765,7 @@ $('bVerify').onclick = async () => {
   const io = boardIo(); ackQueue.length = 0;
   io.send(layoutQueryPacket()); const a = await io.ack(0x0F, 1500);
   if (!a) { setSend(ackText(null), 'bad'); return; }
+  boardFreeKb = a.freeKb; renderMeter();
   const o = ed.toJSON(), same = o.ok && a.crc !== 0 && a.crc === crc32(o.bytes);
   setSend('Board: ' + ackText(a) + '. ' + (a.crc === 0 ? 'No layout on the board.' : same ? 'It has exactly the layout shown here.' : 'It has a different layout from the one shown here.'), same ? 'ok' : 'mute');
 };

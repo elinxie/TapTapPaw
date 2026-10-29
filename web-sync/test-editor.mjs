@@ -31,7 +31,8 @@ for (const t of TEMPLATES) {
   const ed = createEditor();
   assert.equal(ed.state.pages.length, 1);
   assert.equal(ed.toJSON().text, '{"v":1,"pg":[{"w":[]}]}');
-  TYPES.forEach((t, i) => { if (i && i % 12 === 0) ed.addPage(); const r = ed.addWidget(Math.floor(i / 12), t); assert.equal(r.ok, true, t); }); // 12 per page
+  TYPES.forEach((t, i) => { if (i && i % 12 === 0) ed.addPage(); const r = ed.addWidget(Math.floor(i / 12), t); assert.equal(r.ok, true, t); if (t === 'pc') ed.setProp(r.id, 'i', 0); }); // 12 per page; the page gives a picture its slot
+  { const e2 = createEditor(); const r = e2.addWidget(0, 'pc'); assert.equal(e2.toJSON().ok, false, 'a picture widget without a picture is not sendable'); e2.setProp(r.id, 'i', 3); assert.equal(e2.toJSON().ok, true); assert.equal(JSON.parse(e2.toJSON().text).pg[0].w[0].i, 3); }
   const out = ed.toJSON();
   assert.equal(out.ok, true, out.err);
   assert.ok(out.size < 2000, 'one of each widget is small: ' + out.size);

@@ -469,7 +469,12 @@ Ack Session::make(uint8_t cmd, uint8_t status, uint8_t detail, bool own_crc, uin
   a.detail = detail;
   a.flags = (uint8_t)(st.state_flags() | (is_open ? FL_SESSION_OPEN : 0));
   a.seq = next_seq;
-  size_t kb = st.free_bytes() / 1024;
+  // free space costs a walk over the whole LittleFS partition (~0.1 s): chunk acks reuse the value from the last other ack
+  if (cmd != PKT_CHUNK || !free_known) {
+    free_cache = st.free_bytes();
+    free_known = true;
+  }
+  size_t kb = free_cache / 1024;
   a.free_kb = (uint16_t)(kb > 65535 ? 65535 : kb);
   a.crc = own_crc ? crc : st.stored_crc();
   return a;

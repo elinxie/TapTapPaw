@@ -130,3 +130,44 @@ function makeBoard(opts = {}) {
   assert.equal(r5.ok, false); assert.match(r5.message, /checksum mismatch/);
 }
 console.log('layout tests ok (' + n + ' shared cases)');
+{
+  // pictures: packets with a slot, SJPG assembly, which slots a layout uses, picture upload verified by the END ack crc
+  const lib2 = new Function(code + '; return { pkt, jpegStripApp, sjpgAssemble, sjpgInfo, picturesUsed, layoutQueryPacket, layoutResetPacket, layoutBeginPacket, uploadLayoutBytes, crc32, PIC };')();
+  assert.deepEqual(arr(lib2.layoutQueryPacket()), [0xFF, 0x0F, 0]);
+  assert.deepEqual(arr(lib2.layoutQueryPacket(3)), [0xFF, 0x0F, 1, 3]);
+  assert.deepEqual(arr(lib2.layoutResetPacket(7)), [0xFF, 0x11, 1, 7]);
+  const bp = lib2.layoutBeginPacket(new Uint8Array(70000).fill(1), 1, 5);
+  assert.deepEqual(arr(bp.subarray(0, 10)), [0xFF, 0x0B, 11, 1, 5, 1, 0x70, 0x11, 0x01, 0]);
+  const strips = [Uint8Array.from([0xFF, 0xD8, 1, 2, 0xFF, 0xD9]), Uint8Array.from([0xFF, 0xD8, 3, 0xFF, 0xD9])];
+  const sj = lib2.sjpgAssemble(240, 20, strips);
+  assert.deepEqual(lib2.sjpgInfo(sj), { w: 240, h: 20, strips: 2, stripH: 16 });
+  assert.equal(sj.length, 22 + 4 + 11);
+  assert.deepEqual(arr(sj.subarray(0, 14)), [...'_SJPG__'].map((c) => c.charCodeAt(0)).concat([0], [...'V1.00'].map((c) => c.charCodeAt(0)), [0]));
+  assert.deepEqual(arr(sj.subarray(22, 26)), [6, 0, 5, 0]);
+  assert.deepEqual(arr(sj.subarray(26)), [...strips[0], ...strips[1]]);
+  // the same bytes python's fixture generator writes for the header (sketch/test/fixtures/pic_96x64.sjpg)
+  const fx = new Uint8Array(readFileSync(here('../sketch/test/fixtures/pic_96x64.sjpg')));
+  assert.deepEqual(lib2.sjpgInfo(fx), { w: 96, h: 64, strips: 4, stripH: 16 });
+  assert.equal(lib2.sjpgInfo(Uint8Array.from([1, 2, 3])), null);
+  const used = lib2.picturesUsed({ v: 1, pg: [{ bg: { t: 'i', i: 2 }, w: [{ t: 'pc', x: 0, y: 0, w: 96, h: 64, i: 5 }, { t: 'dc', x: 0, y: 0, w: 10, h: 10 }] }, { m: 1 }] });
+  assert.deepEqual([...used.entries()], [[2, { w: 240, h: 320 }], [5, { w: 96, h: 64 }]]);
+  // picture upload against a tiny simulated board: no QUERY verify, the END ack carries the crc
+  const pic = fx, acks = [];
+  let open = false, data = [], stored = null, sent = [];
+  const mk = (cmd, status, extra = {}) => Object.assign({ cmd, status, statusName: ['ok'][status] || 'x', detail: 0, detailName: '', seq: Math.ceil(data.length / 192), crc: 0 }, extra);
+  const io = {
+    send(u) { sent.push(u[1]); const id = u[1], p = Array.from(u.subarray(3));
+      if (id === 0x0B) { open = true; data = []; assert.equal(p[0], 1); assert.equal(p[1], 4); acks.push(mk(id, 0)); }
+      else if (id === 0x0C) { data.push(...p.slice(2)); acks.push(mk(id, 0)); }
+      else if (id === 0x0D) { stored = Uint8Array.from(data); acks.push(mk(id, 0, { crc: lib2.crc32(stored) })); }
+      else acks.push(mk(id, 0)); },
+    ack: async (cmd) => { const i = acks.findIndex((a) => a.cmd === cmd); return i >= 0 ? acks.splice(i, 1)[0] : null; },
+  };
+  const r = await lib2.uploadLayoutBytes(pic, io, { kind: 1, slot: 4 });
+  assert.equal(r.ok, true, r.message); assert.deepEqual(stored, pic); assert.ok(!sent.includes(0x0F), 'no layout query for a picture');
+  // APPn removal: SOI, APP0 kept, APP2 (ICC) dropped, DQT kept, everything from SOS on kept
+  const jp = Uint8Array.from([0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 1, 2, 0xFF, 0xE2, 0, 5, 9, 9, 9, 0xFF, 0xDB, 0, 3, 7, 0xFF, 0xDA, 0, 2, 0xAA, 0xFF, 0xE2, 0xBB, 0xFF, 0xD9]);
+  assert.deepEqual(arr(lib2.jpegStripApp(jp)), [0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 1, 2, 0xFF, 0xDB, 0, 3, 7, 0xFF, 0xDA, 0, 2, 0xAA, 0xFF, 0xE2, 0xBB, 0xFF, 0xD9]);
+  assert.deepEqual(arr(lib2.jpegStripApp(Uint8Array.from([1, 2, 3]))), [1, 2, 3]);
+  console.log('picture tests ok');
+}
