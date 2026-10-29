@@ -1,5 +1,6 @@
 #include "animation.h"
 #include "accessory.h"
+#include "layout.h"
 #include "ui/ui.h"
 //=========================== custom animation task ===========================
 
@@ -63,6 +64,7 @@ static unsigned long happy_start = 0;
 
 void set_mood(uint8_t mood) {
   unsigned long now = millis();
+  layout_feed_mood(mood);
   happy_active = false;
   if (mood == MOOD_HAPPY) {
     happy_active = true;
@@ -87,6 +89,7 @@ void eye_blink_animation() {
       return;
     }
     happy_active = false;
+    layout_feed_mood(MOOD_NORMAL);
   }
 
   if (!eyelid_visible) {
@@ -193,6 +196,7 @@ void random_mouse_task(lv_timer_t *timer) {
 
 // analog clock animation
 void clock_animation(uint8_t h, uint8_t m, uint8_t s) {
+  layout_feed_time(h, m, s);
 
   if (m != last_min) {  //update shorthand and longhand only when minute changes (to reduce unnecessary updates)
     lv_img_set_angle(ui_main_Image_shorthand, h * 300 + m * 5); 
@@ -212,6 +216,7 @@ void chart_animation(uint8_t cpu, uint8_t mem_used, uint8_t battery, bool chargi
       chart_data[0] = cpu;
       chart_data[1] = mem_used;
       chart_data[2] = battery;
+      layout_feed_system(cpu, mem_used, battery, charging);
       //charge status icon display
       if (charging != last_charge) {
         if (charging) {
@@ -231,6 +236,7 @@ void chart_animation(uint8_t cpu, uint8_t mem_used, uint8_t battery, bool chargi
 
 // media play status
 void media_play_status(uint8_t mediaState) {
+  layout_feed_media_state(mediaState);
 
   if (mediaState != last_mediaState) {
     last_mediaState = mediaState;
@@ -244,6 +250,7 @@ void media_play_status(uint8_t mediaState) {
 
 // media track information
 void media_track_status(char *title, char *artist) {
+  layout_feed_music(title, artist);
   lv_label_set_text(ui_main_Label_title, title);
   lv_label_set_text(ui_main_Label_artist, artist);
 }

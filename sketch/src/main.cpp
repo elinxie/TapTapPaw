@@ -19,6 +19,7 @@ const String version = String(firmware_version) + " | " __DATE__ "-" __TIME__;
 #include "accessory.h"
 #include "animation.h"
 #include "keymap.h"
+#include "layout.h"
 #include "power.h"
 #include "ui/ui.h"
 #include "ui_ext.h"
@@ -61,6 +62,7 @@ static uint8_t packetLength = 0;
 unsigned long connect_timer = 0;
 bool app_connected = false;
 bool last_connected_state = true;
+static bool boot_held_at_power_up = false;
 
 // wewather icon
 const lv_img_dsc_t weather_icon[6] = {ui_img_sun_png, ui_img_cloud_png, ui_img_rain_png, ui_img_storm_png, ui_img_snow_png, ui_img_moon_png};
@@ -305,6 +307,7 @@ static void apply_wallpaper(uint8_t idx) {
   wallpaper_idx = idx;
   lv_obj_set_style_bg_img_src(ui_Screen_main, wallpaper_img[idx], LV_PART_MAIN | LV_STATE_DEFAULT);
   lv_obj_set_style_bg_img_src(ui_Screen_setting, wallpaper_img[idx], LV_PART_MAIN | LV_STATE_DEFAULT);
+  layout_on_wallpaper(idx); // custom pages with a weather-driven background follow
 }
 
 // ---- Key actions. Which gesture runs which action is the key map (keymap.cpp, settings screen "More >").
@@ -316,6 +319,7 @@ static void run_key_action(uint8_t action) {
     case ACT_PAW_TAP:
       paw_tap(false);
       tap_count++;
+      layout_feed_taps(tap_count);
       tap_dirty = true;
       tap_last_ms = millis();
       break;
@@ -386,6 +390,7 @@ static void run_key_action(uint8_t action) {
       break;
     case ACT_RESET_TAPS:
       tap_count = 0;
+      layout_feed_taps(0);
       tap_dirty = false;
       tap_count_save(0);
       show_toast("tap counter reset");
@@ -420,6 +425,7 @@ static void keys_housekeeping() {
 static void apply_weather(uint8_t weather_group, int8_t temp_c, uint8_t humidity, uint8_t hh, uint8_t mm) {
   last_temp_c = temp_c; // signed, so sub-zero temperatures display correctly
   last_humidity = humidity;
+  layout_feed_weather(weather_group, temp_c, humidity, hh, mm);
 
   char time_str[6]; // HH:MM + null
   snprintf(time_str, sizeof(time_str), "%02d:%02d", hh, mm);
@@ -519,6 +525,8 @@ void serial_parse(byte b) {
     } else if (packet[1] == 0x08) { // Key map
       packetLength = packet[2] + 3;
     } else if (packet[1] == 0x09 || packet[1] == 0x0A) { // WiFi credentials / location
+      packetLength = packet[2] + 3;
+    } else if (layout_packet_id(packet[1])) { // layout upload (0x0B..0x0F, 0x11), see docs/WIDGETS.md
       packetLength = packet[2] + 3;
     }
 
@@ -681,6 +689,10 @@ void serial_parse(byte b) {
         memcpy(&lo, &packet[7], 4);
         wifi_sync_set_location(la / 100000.0f, lo / 100000.0f);
       }
+
+      // Layout upload: [0xFF][0x0B..0x0F | 0x11][len][payload]. Answered with an ack packet 0x10 (layout_core.h).
+    } else if (layout_packet_id(packet[1])) {
+      layout_packet(packet, packetLength);
     } // else packet  type is 0x02 (music), which is handled above
     // Reset packet index for next frame
     packetIndex = 0;
@@ -712,6 +724,7 @@ void setup() {
   analogSetAttenuation(ADC_0db); // 0dB(1.0 ครั้ง) 0~800mV   for LDR
   pinMode(LDR_PIN, ANALOG); // ldr analog input read brightness
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  boot_held_at_power_up = (digitalRead(BUTTON_PIN) == LOW); // BOOT held at power-up: touch calibration AND layout safe mode (layout.cpp)
   pinMode(LED_RED_PIN, OUTPUT);
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_BLUE_PIN, OUTPUT);
@@ -791,9 +804,11 @@ void setup() {
 
   keys_init(); // physical MX keys on CN1/P3
   tap_count = tap_count_load();
+  layout_feed_taps(tap_count);
   keymap_load(); // key gesture -> action map
   power_load(); // idle behaviour setting
   ui_ext_init(); // "More >" button + extra settings screen
+  layout_begin(boot_held_at_power_up); // custom widget layout from LittleFS, with safe mode (layout.cpp)
   wifi_sync_begin(); // WiFi mode task (no-op in the normal build)
   
   //test sound effect
@@ -817,6 +832,7 @@ void loop() {
 #endif
 
   lv_task_handler();
+  layout_poll(); // apply a layout that was just uploaded
   autoDim(); // handle auto dimming based on ambient light
   sleepy_animation(); // handle sleepy animation
   eye_blink_animation(); // handle eye blinking animation

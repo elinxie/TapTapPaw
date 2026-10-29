@@ -1,0 +1,74 @@
+# <error name>\t<layout json>. Shared by layout_core_test.cpp (firmware parser) and web-sync/test-layout.mjs (page validator).
+ok	{"v":1,"pg":[{}]}
+ok	{"v":1,"pg":[{"m":1}]}
+ok	{"v":1,"rot":3,"pg":[{"m":1},{"bg":{"t":"s","c":"#abc"},"w":[]}]}
+ok	{"v":1,"rot":600,"pg":[{"bg":{"t":"g","c":"#000000","d":"#FFFFFF"}}]}
+ok	{"v":1,"pg":[{"bg":{"t":"b","i":0}},{"bg":{"t":"b","i":5}}]}
+ok	{"v":1,"pg":[{"bg":{"t":"w"}}],"future":{"a":[1,2,{"b":null}]}}
+ok	{"v":1,"pg":[{"w":[{"t":"tc","x":310,"y":230,"w":10,"h":10,"unknown":"ignored"}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"say \"hi\" \\ ok"}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"sl","x":0,"y":0,"w":10,"h":10,"k":1}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"wx","x":0,"y":0,"w":10,"h":10,"k":2}]}]}
+empty	
+syntax error	not json
+syntax error	[]
+syntax error	{"v":1,"pg":[{}],}
+syntax error	{"v":1,"pg":[{}
+syntax error	{"v":1,"pg":[{"w":[{"t":"tc","x":"1","y":0,"w":10,"h":10}]}]}
+syntax error	{"v":"1","pg":[{}]}
+syntax error	{"v":1,"pg":{}}
+syntax error	{"v":1,"pg":[1]}
+syntax error	{"v":1,"pg":[{"w":["tc"]}]}
+syntax error	{"v":1,"pg":[{"w":[{"t":5,"x":0,"y":0,"w":10,"h":10}]}]}
+syntax error	{"v":1,"pg":[{"w":[{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"a\nb"}]}]}
+syntax error	{"v":1,"pg":[{"w":[{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":7}]}]}
+syntax error	{"v":1,"pg":[{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10,"c":null}]}]}
+trailing data	{"v":1,"pg":[{}]} x
+trailing data	{"v":1,"pg":[{}]}{}
+unsupported version	{}
+unsupported version	{"v":2,"pg":[{}]}
+unsupported version	{"v":0,"pg":[{}]}
+unsupported version	{"pg":[{}]}
+no pages	{"v":1}
+no pages	{"v":1,"pg":[]}
+too many pages	{"v":1,"pg":[{},{},{},{},{},{},{}]}
+ok	{"v":1,"pg":[{},{},{},{},{},{}]}
+value out of range	{"v":1,"rot":1,"pg":[{}]}
+value out of range	{"v":1,"rot":601,"pg":[{}]}
+value out of range	{"v":1,"rot":-5,"pg":[{}]}
+second main page	{"v":1,"pg":[{"m":1},{"m":1}]}
+bad page	{"v":1,"pg":[{"m":1,"bg":{"t":"w"}}]}
+bad page	{"v":1,"pg":[{"m":1,"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10}]}]}
+value out of range	{"v":1,"pg":[{"m":2}]}
+bad page	{"v":1,"pg":[{"bg":{"t":"x"}}]}
+value out of range	{"v":1,"pg":[{"bg":{"t":"b"}}]}
+value out of range	{"v":1,"pg":[{"bg":{"t":"b","i":6}}]}
+bad color	{"v":1,"pg":[{"bg":{"t":"s"}}]}
+bad color	{"v":1,"pg":[{"bg":{"t":"g","c":"#000"}}]}
+bad color	{"v":1,"pg":[{"bg":{"t":"s","c":"red"}}]}
+bad color	{"v":1,"pg":[{"bg":{"t":"s","c":"#12345"}}]}
+bad color	{"v":1,"pg":[{"bg":{"t":"s","c":"#12345g"}}]}
+unknown widget type	{"v":1,"pg":[{"w":[{"t":"zz","x":0,"y":0,"w":10,"h":10}]}]}
+unknown widget type	{"v":1,"pg":[{"w":[{"x":0,"y":0,"w":10,"h":10}]}]}
+widget outside the 320x240 screen	{"v":1,"pg":[{"w":[{"t":"tc","y":0,"w":10,"h":10}]}]}
+widget outside the 320x240 screen	{"v":1,"pg":[{"w":[{"t":"tc","x":-1,"y":0,"w":10,"h":10}]}]}
+widget outside the 320x240 screen	{"v":1,"pg":[{"w":[{"t":"tc","x":0,"y":0,"w":0,"h":10}]}]}
+widget outside the 320x240 screen	{"v":1,"pg":[{"w":[{"t":"tc","x":311,"y":0,"w":10,"h":10}]}]}
+widget outside the 320x240 screen	{"v":1,"pg":[{"w":[{"t":"tc","x":0,"y":231,"w":10,"h":10}]}]}
+widget outside the 320x240 screen	{"v":1,"pg":[{"w":[{"t":"tc","x":10000,"y":0,"w":10,"h":10}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"sl","x":0,"y":0,"w":10,"h":10,"k":2}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"sh","x":0,"y":0,"w":10,"h":10,"k":2}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"wx","x":0,"y":0,"w":10,"h":10,"k":3}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10,"z":2}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10,"a":3}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10,"o":256}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10,"r":121}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"dc","x":0,"y":0,"w":10,"h":10,"f":2}]}]}
+bad text	{"v":1,"pg":[{"w":[{"t":"tx","x":0,"y":0,"w":10,"h":10}]}]}
+bad text	{"v":1,"pg":[{"w":[{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":""}]}]}
+bad text	{"v":1,"pg":[{"w":[{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwxy"}]}]}
+too many widgets	{"v":1,"pg":[{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10}]}]}
+too many widgets	{"v":1,"pg":[{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10}]},{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10}]},{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10}]},{"w":[{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10},{"t":"tc","x":0,"y":0,"w":10,"h":10}]}]}
+text pool full	{"v":1,"pg":[{"w":[{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"}]},{"w":[{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"}]},{"w":[{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"},{"t":"tx","x":0,"y":0,"w":10,"h":10,"s":"abcdefghijklmnopqrstuvwx"}]}]}

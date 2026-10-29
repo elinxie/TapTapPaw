@@ -1,0 +1,579 @@
+#include "layout_core.h"
+#include <new>
+#include <string.h>
+
+namespace lc {
+
+static const char *const ERR_NAMES[E_COUNT] = {
+  "ok", "empty", "too big", "syntax error", "nested too deep", "unsupported version", "no pages", "too many pages", "bad page",
+  "second main page", "too many widgets", "unknown widget type", "widget outside the 320x240 screen", "bad color", "value out of range",
+  "bad text", "text pool full", "trailing data"};
+
+const char *err_name(Err e) { return e < E_COUNT ? ERR_NAMES[e] : "?"; }
+
+uint32_t crc32_update(uint32_t crc, const uint8_t *d, size_t n) {
+  crc = ~crc;
+  while (n--) {
+    crc ^= *d++;
+    for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+  }
+  return ~crc;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Minimal bounded JSON reader. Only what the schema needs: objects, arrays, strings (\" \\ \/ escapes), integers, true/false/null.
+// ------------------------------------------------------------------------------------------------
+namespace {
+
+constexpr uint8_t MAX_DEPTH = 8;
+
+struct P {
+  const char *s;
+  size_t n;
+  size_t i;
+};
+
+void ws(P &p) {
+  while (p.i < p.n) {
+    char c = p.s[p.i];
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') p.i++;
+    else break;
+  }
+}
+bool eat(P &p, char c) {
+  ws(p);
+  if (p.i < p.n && p.s[p.i] == c) {
+    p.i++;
+    return true;
+  }
+  return false;
+}
+bool lit(P &p, const char *w) {
+  size_t l = strlen(w);
+  if (p.i + l > p.n || memcmp(p.s + p.i, w, l) != 0) return false;
+  p.i += l;
+  return true;
+}
+
+// Reads a string. Writes at most cap-1 chars to out (out may be NULL); len is the full decoded length.
+Err read_str(P &p, char *out, size_t cap, size_t &len) {
+  ws(p);
+  if (p.i >= p.n || p.s[p.i] != '"') return E_SYNTAX;
+  p.i++;
+  len = 0;
+  for (;;) {
+    if (p.i >= p.n) return E_SYNTAX;
+    unsigned char c = (unsigned char)p.s[p.i++];
+    if (c == '"') break;
+    if (c < 0x20) return E_SYNTAX;
+    if (c == '\\') {
+      if (p.i >= p.n) return E_SYNTAX;
+      char e = p.s[p.i++];
+      if (e == '"' || e == '\\' || e == '/') c = (unsigned char)e;
+      else return E_SYNTAX;
+    }
+    if (out && cap > 0 && len + 1 < cap) out[len] = (char)c;
+    len++;
+  }
+  if (out && cap > 0) out[len < cap ? len : cap - 1] = '\0';
+  return E_OK;
+}
+
+Err read_int(P &p, int32_t &v) {
+  ws(p);
+  bool neg = false;
+  if (p.i < p.n && p.s[p.i] == '-') {
+    neg = true;
+    p.i++;
+  }
+  size_t d = 0;
+  int32_t x = 0;
+  while (p.i < p.n && p.s[p.i] >= '0' && p.s[p.i] <= '9') {
+    if (d >= 6) return E_SYNTAX;
+    x = x * 10 + (p.s[p.i] - '0');
+    p.i++;
+    d++;
+  }
+  if (d == 0) return E_SYNTAX;
+  if (p.i < p.n && (p.s[p.i] == '.' || p.s[p.i] == 'e' || p.s[p.i] == 'E')) return E_SYNTAX; // integers only
+  v = neg ? -x : x;
+  return E_OK;
+}
+
+int hexval(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+Err read_color(P &p, uint32_t &out) {
+  char b[10];
+  size_t l;
+  Err e = read_str(p, b, sizeof b, l);
+  if (e) return e;
+  if ((l != 4 && l != 7) || b[0] != '#') return E_COLOR;
+  uint32_t v = 0;
+  if (l == 4) {
+    for (int i = 1; i < 4; i++) {
+      int h = hexval(b[i]);
+      if (h < 0) return E_COLOR;
+      v = (v << 8) | (uint32_t)(h * 17);
+    }
+  } else {
+    for (int i = 1; i < 7; i++) {
+      int h = hexval(b[i]);
+      if (h < 0) return E_COLOR;
+      v = (v << 4) | (uint32_t)h;
+    }
+  }
+  out = v;
+  return E_OK;
+}
+
+Err skip(P &p, uint8_t depth) {
+  if (depth > MAX_DEPTH) return E_DEPTH;
+  ws(p);
+  if (p.i >= p.n) return E_SYNTAX;
+  char c = p.s[p.i];
+  if (c == '"') {
+    size_t l;
+    return read_str(p, nullptr, 0, l);
+  }
+  if (c == '{') {
+    p.i++;
+    if (eat(p, '}')) return E_OK;
+    for (;;) {
+      size_t l;
+      Err e = read_str(p, nullptr, 0, l);
+      if (e) return e;
+      if (!eat(p, ':')) return E_SYNTAX;
+      e = skip(p, depth + 1);
+      if (e) return e;
+      if (eat(p, ',')) continue;
+      if (eat(p, '}')) return E_OK;
+      return E_SYNTAX;
+    }
+  }
+  if (c == '[') {
+    p.i++;
+    if (eat(p, ']')) return E_OK;
+    for (;;) {
+      Err e = skip(p, depth + 1);
+      if (e) return e;
+      if (eat(p, ',')) continue;
+      if (eat(p, ']')) return E_OK;
+      return E_SYNTAX;
+    }
+  }
+  if (lit(p, "true") || lit(p, "false") || lit(p, "null")) return E_OK;
+  if (c == '-' || (c >= '0' && c <= '9')) {
+    size_t st = p.i;
+    while (p.i < p.n && ((p.s[p.i] >= '0' && p.s[p.i] <= '9') || p.s[p.i] == '-' || p.s[p.i] == '+' || p.s[p.i] == '.' || p.s[p.i] == 'e' || p.s[p.i] == 'E')) p.i++;
+    return (p.i - st > 20) ? E_SYNTAX : E_OK;
+  }
+  return E_SYNTAX;
+}
+
+bool key_is(const char *k, size_t kl, const char *name) { return kl == strlen(name) && memcmp(k, name, kl) == 0; }
+
+Err int_in(P &p, int32_t lo, int32_t hi, int32_t &v) {
+  Err e = read_int(p, v);
+  if (e) return e;
+  return (v < lo || v > hi) ? E_RANGE : E_OK;
+}
+
+WType wtype_from(const char *s, size_t l) {
+  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl"};
+  for (uint8_t i = 1; i < W_COUNT; i++)
+    if (key_is(s, l, names[i])) return (WType)i;
+  return W_NONE;
+}
+
+Err parse_widget(P &p, Layout &L) {
+  if (L.nwidgets >= MAX_WIDGETS_TOTAL) return E_TOO_MANY_WIDGETS;
+  if (!eat(p, '{')) return E_SYNTAX;
+  Widget w;
+  memset(&w, 0, sizeof w);
+  w.opa = 255;
+  bool hx = false, hy = false, hw = false, hh = false;
+  char text[MAX_TEXT_LEN + 1];
+  size_t tl = 0;
+  bool has_text = false;
+  int32_t v;
+  if (!eat(p, '}')) {
+    for (;;) {
+      char key[8];
+      size_t kl;
+      Err e = read_str(p, key, sizeof key, kl);
+      if (e) return e;
+      if (!eat(p, ':')) return E_SYNTAX;
+      if (key_is(key, kl, "t")) {
+        char tb[4];
+        size_t l;
+        e = read_str(p, tb, sizeof tb, l);
+        if (e) return e;
+        w.type = wtype_from(tb, l);
+        if (w.type == W_NONE) return E_WIDGET_TYPE;
+      } else if (key_is(key, kl, "x")) { e = read_int(p, v); w.x = (int16_t)v; hx = true; if (!e && (v < -9999 || v > 9999)) e = E_GEOMETRY; }
+      else if (key_is(key, kl, "y")) { e = read_int(p, v); w.y = (int16_t)v; hy = true; if (!e && (v < -9999 || v > 9999)) e = E_GEOMETRY; }
+      else if (key_is(key, kl, "w")) { e = read_int(p, v); w.w = (int16_t)v; hw = true; if (!e && (v < -9999 || v > 9999)) e = E_GEOMETRY; }
+      else if (key_is(key, kl, "h")) { e = read_int(p, v); w.h = (int16_t)v; hh = true; if (!e && (v < -9999 || v > 9999)) e = E_GEOMETRY; }
+      else if (key_is(key, kl, "k")) { e = int_in(p, 0, 2, v); w.k = (uint8_t)v; }
+      else if (key_is(key, kl, "z")) { e = int_in(p, 0, 1, v); w.z = (uint8_t)v; }
+      else if (key_is(key, kl, "a")) { e = int_in(p, 0, 2, v); w.a = (uint8_t)v; }
+      else if (key_is(key, kl, "r")) { e = int_in(p, 0, 120, v); w.r = (uint8_t)v; }
+      else if (key_is(key, kl, "o")) { e = int_in(p, 0, 255, v); w.opa = (uint8_t)v; }
+      else if (key_is(key, kl, "f")) { e = int_in(p, 0, 1, v); w.f24 = v != 0; }
+      else if (key_is(key, kl, "q")) { e = int_in(p, 0, 1, v); w.secs = v != 0; }
+      else if (key_is(key, kl, "c")) { e = read_color(p, w.c); w.has_c = true; }
+      else if (key_is(key, kl, "s")) {
+        e = read_str(p, text, sizeof text, tl);
+        if (!e && tl > MAX_TEXT_LEN) e = E_TEXT;
+        has_text = true;
+      } else e = skip(p, 3);
+      if (e) return e;
+      if (eat(p, ',')) continue;
+      if (eat(p, '}')) break;
+      return E_SYNTAX;
+    }
+  }
+  if (w.type == W_NONE) return E_WIDGET_TYPE;
+  if (!(hx && hy && hw && hh)) return E_GEOMETRY;
+  if (w.x < 0 || w.y < 0 || w.w < 1 || w.h < 1 || w.x + w.w > SCREEN_W || w.y + w.h > SCREEN_H) return E_GEOMETRY;
+  if ((w.type == W_SLIDER && w.k > 1) || (w.type == W_SHAPE && w.k > 1)) return E_RANGE; // wx uses k 0..2
+  if (w.type == W_LABEL) {
+    if (!has_text || tl == 0) return E_TEXT;
+    if (L.text_used + tl + 1 > MAX_TEXT_POOL) return E_TEXT_POOL;
+    memcpy(L.text + L.text_used, text, tl);
+    L.text[L.text_used + tl] = '\0';
+    w.toff = L.text_used;
+    w.tlen = (uint8_t)tl;
+    L.text_used = (uint16_t)(L.text_used + tl + 1);
+  }
+  L.widgets[L.nwidgets++] = w;
+  return E_OK;
+}
+
+Err parse_bg(P &p, Page &pg) {
+  if (!eat(p, '{')) return E_SYNTAX;
+  char t = 'w';
+  int32_t idx = -1, v;
+  bool hc = false, hd = false;
+  if (!eat(p, '}')) {
+    for (;;) {
+      char key[4];
+      size_t kl;
+      Err e = read_str(p, key, sizeof key, kl);
+      if (e) return e;
+      if (!eat(p, ':')) return E_SYNTAX;
+      if (key_is(key, kl, "t")) {
+        char tb[4];
+        size_t l;
+        e = read_str(p, tb, sizeof tb, l);
+        if (e) return e;
+        if (l != 1 || (tb[0] != 'w' && tb[0] != 'b' && tb[0] != 's' && tb[0] != 'g')) return E_PAGE;
+        t = tb[0];
+      } else if (key_is(key, kl, "i")) { e = int_in(p, 0, 5, v); idx = v; }
+      else if (key_is(key, kl, "c")) { e = read_color(p, pg.c1); hc = true; }
+      else if (key_is(key, kl, "d")) { e = read_color(p, pg.c2); hd = true; }
+      else e = skip(p, 4);
+      if (e) return e;
+      if (eat(p, ',')) continue;
+      if (eat(p, '}')) break;
+      return E_SYNTAX;
+    }
+  }
+  switch (t) {
+    case 'w': pg.bg_type = BG_WEATHER; break;
+    case 'b':
+      if (idx < 0) return E_RANGE;
+      pg.bg_type = BG_BUILTIN;
+      pg.bg_idx = (uint8_t)idx;
+      break;
+    case 's':
+      if (!hc) return E_COLOR;
+      pg.bg_type = BG_SOLID;
+      break;
+    case 'g':
+      if (!hc || !hd) return E_COLOR;
+      pg.bg_type = BG_GRADIENT;
+      break;
+  }
+  return E_OK;
+}
+
+Err parse_page(P &p, Layout &L) {
+  if (L.npages >= MAX_PAGES) return E_TOO_MANY_PAGES;
+  if (!eat(p, '{')) return E_SYNTAX;
+  Page pg;
+  memset(&pg, 0, sizeof pg);
+  pg.bg_type = BG_WEATHER;
+  pg.first = L.nwidgets;
+  bool has_bg = false, has_w = false;
+  int32_t v;
+  if (!eat(p, '}')) {
+    for (;;) {
+      char key[4];
+      size_t kl;
+      Err e = read_str(p, key, sizeof key, kl);
+      if (e) return e;
+      if (!eat(p, ':')) return E_SYNTAX;
+      if (key_is(key, kl, "m")) {
+        e = int_in(p, 0, 1, v);
+        pg.is_main = (v == 1);
+      } else if (key_is(key, kl, "bg")) {
+        e = parse_bg(p, pg);
+        has_bg = true;
+      } else if (key_is(key, kl, "w")) {
+        has_w = true;
+        if (!eat(p, '[')) return E_SYNTAX;
+        if (!eat(p, ']')) {
+          for (;;) {
+            if ((uint8_t)(L.nwidgets - pg.first) >= MAX_WIDGETS_PAGE) return E_TOO_MANY_WIDGETS;
+            e = parse_widget(p, L);
+            if (e) return e;
+            if (eat(p, ',')) continue;
+            if (eat(p, ']')) break;
+            return E_SYNTAX;
+          }
+        }
+      } else e = skip(p, 3);
+      if (e) return e;
+      if (eat(p, ',')) continue;
+      if (eat(p, '}')) break;
+      return E_SYNTAX;
+    }
+  }
+  if (pg.is_main) {
+    if (has_bg || (has_w && L.nwidgets != pg.first)) return E_PAGE;
+    for (uint8_t i = 0; i < L.npages; i++)
+      if (L.pages[i].is_main) return E_MAIN_DUP;
+  }
+  pg.nw = (uint8_t)(L.nwidgets - pg.first);
+  L.pages[L.npages++] = pg;
+  return E_OK;
+}
+
+} // namespace
+
+Err parse(const char *json, size_t len, Layout &out) {
+  if (json == nullptr || len == 0) return E_EMPTY;
+  if (len > MAX_LAYOUT_BYTES) return E_TOO_BIG;
+  memset(&out, 0, sizeof out);
+  P p{json, len, 0};
+  if (!eat(p, '{')) return E_SYNTAX;
+  bool hv = false, hp = false;
+  int32_t v;
+  if (!eat(p, '}')) {
+    for (;;) {
+      char key[4];
+      size_t kl;
+      Err e = read_str(p, key, sizeof key, kl);
+      if (e) return e;
+      if (!eat(p, ':')) return E_SYNTAX;
+      if (key_is(key, kl, "v")) {
+        e = read_int(p, v);
+        if (!e && v != SCHEMA_VERSION) e = E_VERSION;
+        out.version = SCHEMA_VERSION;
+        hv = true;
+      } else if (key_is(key, kl, "rot")) {
+        e = read_int(p, v);
+        if (!e && v != 0 && (v < 3 || v > 600)) e = E_RANGE;
+        out.rotate_s = (uint16_t)v;
+      } else if (key_is(key, kl, "pg")) {
+        hp = true;
+        if (!eat(p, '[')) return E_SYNTAX;
+        if (!eat(p, ']')) {
+          for (;;) {
+            e = parse_page(p, out);
+            if (e) return e;
+            if (eat(p, ',')) continue;
+            if (eat(p, ']')) break;
+            return E_SYNTAX;
+          }
+        }
+      } else e = skip(p, 2);
+      if (e) return e;
+      if (eat(p, ',')) continue;
+      if (eat(p, '}')) break;
+      return E_SYNTAX;
+    }
+  }
+  ws(p);
+  if (p.i != p.n) return E_TRAILING;
+  if (!hv) return E_VERSION;
+  if (!hp || out.npages == 0) return E_NO_PAGES;
+  return E_OK;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Upload session
+// ------------------------------------------------------------------------------------------------
+static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+
+size_t ack_encode(const Ack &a, uint8_t *o) {
+  o[0] = 0xFF;
+  o[1] = PKT_ACK;
+  o[2] = 12;
+  o[3] = a.cmd;
+  o[4] = a.status;
+  o[5] = a.detail;
+  o[6] = a.flags;
+  o[7] = (uint8_t)(a.seq & 0xFF);
+  o[8] = (uint8_t)(a.seq >> 8);
+  o[9] = (uint8_t)(a.free_kb & 0xFF);
+  o[10] = (uint8_t)(a.free_kb >> 8);
+  o[11] = (uint8_t)(a.crc & 0xFF);
+  o[12] = (uint8_t)((a.crc >> 8) & 0xFF);
+  o[13] = (uint8_t)((a.crc >> 16) & 0xFF);
+  o[14] = (uint8_t)(a.crc >> 24);
+  return ACK_FRAME_BYTES;
+}
+
+Ack Session::make(uint8_t cmd, uint8_t status, uint8_t detail) {
+  Ack a;
+  a.cmd = cmd;
+  a.status = status;
+  a.detail = detail;
+  a.flags = (uint8_t)(st.state_flags() | (is_open ? FL_SESSION_OPEN : 0));
+  a.seq = next_seq;
+  size_t kb = st.free_bytes() / 1024;
+  a.free_kb = (uint16_t)(kb > 65535 ? 65535 : kb);
+  a.crc = st.stored_crc();
+  return a;
+}
+
+void Session::drop() {
+  if (is_open) st.tmp_discard();
+  is_open = false;
+  received = 0;
+  next_seq = 0;
+  run_crc = 0;
+}
+
+Ack Session::handle(uint8_t id, const uint8_t *p, uint8_t n) {
+  switch (id) {
+    case PKT_BEGIN: return do_begin(p, n);
+    case PKT_CHUNK: return do_chunk(p, n);
+    case PKT_END: return n == 0 ? do_end() : make(id, ST_BAD_PKT);
+    case PKT_ABORT: return n == 0 ? do_abort() : make(id, ST_BAD_PKT);
+    case PKT_QUERY: return make(id, ST_OK);
+    case PKT_RESET:
+      if (n != 0) return make(id, ST_BAD_PKT);
+      drop();
+      if (!st.final_remove()) return make(id, ST_IO);
+      st.set_stored_crc(0);
+      changed = true;
+      return make(id, ST_OK);
+    default: return make(id, ST_BAD_PKT);
+  }
+}
+
+Ack Session::do_begin(const uint8_t *p, uint8_t n) {
+  if (n != 11) return make(PKT_BEGIN, ST_BAD_PKT);
+  uint8_t k = p[0], sl = p[1], v = p[2];
+  uint32_t tot = le32(p + 3), crc = le32(p + 7);
+  if (k != 0) return make(PKT_BEGIN, k == 1 ? ST_UNSUPPORTED : ST_BAD_PKT);
+  if (v != SCHEMA_VERSION) return make(PKT_BEGIN, ST_INVALID, E_VERSION);
+  if (tot == 0) return make(PKT_BEGIN, ST_BAD_PKT);
+  if (tot > MAX_LAYOUT_BYTES) return make(PKT_BEGIN, ST_TOO_BIG, E_TOO_BIG);
+  if (is_open && kind == k && slot == sl && ver == v && total == tot && want_crc == crc) return make(PKT_BEGIN, ST_OK); // resume: ack carries next_seq
+  drop();
+  if (st.free_bytes() < (size_t)tot + 1024) return make(PKT_BEGIN, ST_NO_SPACE);
+  if (!st.tmp_open()) return make(PKT_BEGIN, ST_IO);
+  is_open = true;
+  kind = k;
+  slot = sl;
+  ver = v;
+  total = tot;
+  want_crc = crc;
+  received = 0;
+  run_crc = 0;
+  next_seq = 0;
+  return make(PKT_BEGIN, ST_OK);
+}
+
+Ack Session::do_chunk(const uint8_t *p, uint8_t n) {
+  if (!is_open) return make(PKT_CHUNK, ST_NO_SESSION);
+  if (n < 3) return make(PKT_CHUNK, ST_BAD_PKT);
+  uint16_t seq = (uint16_t)(p[0] | (p[1] << 8));
+  const uint8_t *d = p + 2;
+  size_t dn = (size_t)n - 2;
+  if (dn > CHUNK_BYTES) return make(PKT_CHUNK, ST_BAD_PKT);
+  if (next_seq > 0 && seq == (uint16_t)(next_seq - 1)) return make(PKT_CHUNK, ST_OK); // duplicate of the last chunk (lost ack): already stored
+  if (seq != next_seq) return make(PKT_CHUNK, ST_BAD_SEQ);
+  if (received + dn > total) {
+    drop();
+    return make(PKT_CHUNK, ST_TOO_BIG);
+  }
+  if (received + dn < total && dn != CHUNK_BYTES) return make(PKT_CHUNK, ST_BAD_PKT);
+  if (!st.tmp_write(d, dn)) {
+    drop();
+    return make(PKT_CHUNK, ST_IO);
+  }
+  run_crc = crc32_update(run_crc, d, dn);
+  received += (uint32_t)dn;
+  next_seq++;
+  return make(PKT_CHUNK, ST_OK);
+}
+
+Ack Session::do_end() {
+  if (!is_open) return make(PKT_END, ST_NO_SESSION);
+  if (received != total) return make(PKT_END, ST_INCOMPLETE); // session stays open, host may send the missing chunks
+  if (!st.tmp_close()) {
+    drop();
+    return make(PKT_END, ST_IO);
+  }
+  if (run_crc != want_crc) {
+    drop();
+    return make(PKT_END, ST_CRC);
+  }
+  uint8_t *buf = new (std::nothrow) uint8_t[total + 1];
+  if (!buf) {
+    drop();
+    return make(PKT_END, ST_IO);
+  }
+  size_t got = 0;
+  bool ok = st.tmp_read_all(buf, (size_t)total + 1, got);
+  if (!ok || got != total) {
+    delete[] buf;
+    drop();
+    return make(PKT_END, ST_IO);
+  }
+  if (crc32(buf, got) != want_crc) { // what is in flash is not what was received
+    delete[] buf;
+    drop();
+    return make(PKT_END, ST_CRC);
+  }
+  Layout *L = new (std::nothrow) Layout;
+  if (!L) {
+    delete[] buf;
+    drop();
+    return make(PKT_END, ST_IO);
+  }
+  Err e = parse((const char *)buf, got, *L);
+  delete L;
+  delete[] buf;
+  if (e != E_OK) {
+    drop();
+    return make(PKT_END, ST_INVALID, (uint8_t)e);
+  }
+  if (!st.tmp_commit()) {
+    drop();
+    return make(PKT_END, ST_IO);
+  }
+  st.set_stored_crc(want_crc);
+  is_open = false;
+  received = 0;
+  next_seq = 0;
+  changed = true;
+  return make(PKT_END, ST_OK);
+}
+
+Ack Session::do_abort() {
+  drop();
+  return make(PKT_ABORT, ST_OK);
+}
+
+} // namespace lc

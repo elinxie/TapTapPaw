@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 - Added: tap the weather panel on the device to toggle C/F
 - Fixed: `npm install` in app/ failed because `postinstall` called an undeclared `electron-rebuild`
 - Added: DEVELOPMENT.md and scripts/setup-dev.sh
+- Added: widget layouts: the board can show pages of widgets from a small JSON layout sent over USB, with safe mode (see docs/WIDGETS.md). Serial packets 0x0B-0x11 (upload), board ack 0x10.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
