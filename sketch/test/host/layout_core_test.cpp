@@ -54,7 +54,8 @@ static void test_crc() {
 }
 
 static void test_parse_good() {
-  Layout *L = new Layout;
+  static Layout LL; // static: avoids a leak report, Layout is large for the stack
+  Layout *L = &LL;
   Err e = parse(GOOD, strlen(GOOD), *L);
   CHECK(e == E_OK);
   CHECK(L->npages == 4);
@@ -78,7 +79,7 @@ static void test_parse_good() {
 }
 
 static void test_parse_bad() {
-  CHECK(parse(nullptr, 0, *new Layout) == E_EMPTY);
+  { Layout *L = new Layout; CHECK(parse(nullptr, 0, *L) == E_EMPTY); delete L; }
   CHECK(P("") == E_EMPTY);
   CHECK(P(std::string(MAX_LAYOUT_BYTES + 1, ' ')) == E_TOO_BIG);
   CHECK(P("not json") == E_SYNTAX);
@@ -267,7 +268,12 @@ struct MemStorage : Storage {
   uint32_t crc = 0;
   uint8_t fl = 0;
   size_t free_bytes() override { return free_b; }
-  bool tmp_open() override {
+  uint8_t kind = 0;
+  std::string pics[8];
+  uint32_t pic_crc[8] = {0};
+  std::string art;
+  bool tmp_open(uint8_t k, uint8_t) override {
+    kind = k;
     if (fail_open) return false;
     tmp.clear();
     tmp_is_open = true;
@@ -290,12 +296,30 @@ struct MemStorage : Storage {
     if (corrupt_readback && n) buf[0] ^= 0xFF;
     return true;
   }
-  bool tmp_commit() override {
+  bool tmp_scan(uint32_t &c, size_t &n, uint8_t *head, size_t head_n, uint8_t *tail2) override {
+    if (fail_read) return false;
+    std::string t = tmp;
+    if (corrupt_readback && !t.empty()) t[0] ^= 0x55;
+    c = crc32((const uint8_t *)t.data(), t.size());
+    n = t.size();
+    memset(head, 0, head_n);
+    memcpy(head, t.data(), n < head_n ? n : head_n);
+    if (n >= 2) memcpy(tail2, t.data() + n - 2, 2);
+    return true;
+  }
+  bool tmp_commit(uint8_t k, uint8_t slot) override {
     if (fail_commit) return false;
-    fin = tmp;
+    if (k == KIND_PICTURE) pics[slot] = tmp;
+    else if (k == KIND_ART) art = tmp;
+    else fin = tmp;
     tmp.clear();
     return true;
   }
+  uint32_t picture_crc(uint8_t slot) override { return pics[slot].empty() ? 0 : pic_crc[slot]; }
+  void set_picture_crc(uint8_t slot, uint32_t c) override { pic_crc[slot] = c; }
+  bool picture_remove(uint8_t slot) override { pics[slot].clear(); return true; }
+  bool undecodable = false;
+  bool picture_check(uint8_t, uint8_t) override { return !undecodable; }
   void tmp_discard() override {
     tmp.clear();
     tmp_is_open = false;
@@ -385,7 +409,7 @@ static void test_upload_errors() {
   uint8_t p[11] = {0};
   CHECK(s.handle(PKT_BEGIN, p, 10).status == ST_BAD_PKT);
   CHECK(s.handle(PKT_BEGIN, p, 12).status == ST_BAD_PKT);
-  CHECK(begin(s, d, 1).status == ST_UNSUPPORTED); // image kind is phase 3
+  CHECK(begin(s, d, 3).status == ST_BAD_PKT); // kinds: 0 layout, 1 picture, 2 album art
   CHECK(begin(s, d, 7).status == ST_BAD_PKT);
   CHECK(begin(s, d, 0, 2).status == ST_INVALID);
   CHECK(begin(s, d, 0, 1, 0).status == ST_BAD_PKT);
@@ -463,7 +487,9 @@ static void test_upload_errors() {
   CHECK(s.handle(0x55, nullptr, 0).status == ST_BAD_PKT);
   CHECK(s.handle(PKT_END, p, 3).status == ST_BAD_PKT);
   CHECK(s.handle(PKT_ABORT, p, 1).status == ST_BAD_PKT);
-  CHECK(s.handle(PKT_RESET, p, 1).status == ST_BAD_PKT);
+  CHECK(s.handle(PKT_RESET, p, 2).status == ST_BAD_PKT); // 1 byte = delete a picture slot (test_pictures)
+  uint8_t badslot = 8;
+  CHECK(s.handle(PKT_RESET, &badslot, 1).status == ST_BAD_PKT);
 }
 
 static void test_upload_invalid_layout() {
@@ -532,6 +558,95 @@ static void test_upload_interrupted_and_resume() {
   CHECK(begin(s2, std::string(5000, 'x')).status == ST_TOO_BIG && !st2.tmp_is_open);
 }
 
+// a fake SJPG of the right shape: header + bytes. The board only checks the header, size and crc; LVGL decodes it later.
+static std::string fake_sjpg(uint16_t w, uint16_t h, size_t total) {
+  std::string s("_SJPG__\0V1.00\0", 14);
+  uint16_t v[4] = {w, h, (uint16_t)((h + 15) / 16), 16};
+  s.append((const char *)v, 8);
+  while (s.size() < total) s.push_back((char)(s.size() * 7));
+  return s;
+}
+static Ack begin_kind(Session &s, const std::string &data, uint8_t kind, uint8_t slot) {
+  uint8_t p[11];
+  p[0] = kind; p[1] = slot; p[2] = 1;
+  le32(p + 3, (uint32_t)data.size());
+  le32(p + 7, crc32((const uint8_t *)data.data(), data.size()));
+  return s.handle(PKT_BEGIN, p, 11);
+}
+static Ack send_all(Session &s, const std::string &d) {
+  for (size_t j = 0; j < nchunks(d); j++) { Ack a = chunk(s, d, (uint16_t)j); if (a.status != ST_OK) return a; }
+  return s.handle(PKT_END, nullptr, 0);
+}
+
+static void test_pictures() {
+  MemStorage st;
+  Session s(st);
+  st.fin = "LAYOUT";
+  st.crc = 0x1111;
+  // a 40 KB picture into slot 3
+  std::string pic = fake_sjpg(240, 320, 40000);
+  CHECK(begin_kind(s, pic, KIND_PICTURE, 3).status == ST_OK);
+  Ack a = send_all(s, pic);
+  uint32_t pc = crc32((const uint8_t *)pic.data(), pic.size());
+  CHECK(a.status == ST_OK && a.crc == pc && st.pics[3] == pic);
+  CHECK(st.fin == "LAYOUT" && st.crc == 0x1111); // the layout is untouched
+  CHECK(s.take_pictures_changed() && !s.take_changed());
+  // query with a slot answers that picture's crc; without, the layout's
+  uint8_t q3 = 3, q4 = 4, q9 = 9;
+  CHECK(s.handle(PKT_QUERY, &q3, 1).crc == pc);
+  CHECK(s.handle(PKT_QUERY, &q4, 1).crc == 0);
+  CHECK(s.handle(PKT_QUERY, &q9, 1).status == ST_BAD_PKT);
+  CHECK(s.handle(PKT_QUERY, nullptr, 0).crc == 0x1111);
+  CHECK(s.handle(PKT_QUERY, nullptr, 0).detail == FEATURE_LEVEL);
+  // limits and checks
+  CHECK(begin_kind(s, fake_sjpg(240, 320, 65537), KIND_PICTURE, 0).status == ST_TOO_BIG);
+  CHECK(begin_kind(s, pic, KIND_PICTURE, 8).status == ST_BAD_PKT);
+  std::string notjpg = pic; notjpg[1] = 'X';
+  CHECK(begin_kind(s, notjpg, KIND_PICTURE, 1).status == ST_OK);
+  CHECK(send_all(s, notjpg).status == ST_INVALID && st.pics[1].empty());
+  std::string wide = fake_sjpg(241, 100, 2000);
+  CHECK(begin_kind(s, wide, KIND_PICTURE, 1).status == ST_OK);
+  CHECK(send_all(s, wide).status == ST_INVALID);
+  std::string small = fake_sjpg(96, 64, 3000); // a picture widget smaller than the screen is fine
+  CHECK(begin_kind(s, small, KIND_PICTURE, 1).status == ST_OK);
+  CHECK(send_all(s, small).status == ST_OK && st.pics[1] == small);
+  st.corrupt_readback = true; // flash returns other bytes than were sent
+  CHECK(begin_kind(s, pic, KIND_PICTURE, 2).status == ST_OK);
+  CHECK(send_all(s, pic).status == ST_CRC && st.pics[2].empty());
+  st.corrupt_readback = false;
+  st.free_b = 30000; // no room: refused before anything is written
+  CHECK(begin_kind(s, pic, KIND_PICTURE, 2).status == ST_NO_SPACE);
+  st.free_b = 200000;
+  // delete one picture
+  CHECK(s.handle(PKT_RESET, &q3, 1).status == ST_OK && st.pics[3].empty() && st.pic_crc[3] == 0);
+  CHECK(st.fin == "LAYOUT"); // the layout stays
+  // interrupted picture upload, resumed
+  CHECK(begin_kind(s, pic, KIND_PICTURE, 5).status == ST_OK);
+  for (int j = 0; j < 50; j++) chunk(s, pic, (uint16_t)j);
+  a = begin_kind(s, pic, KIND_PICTURE, 5);
+  CHECK(a.status == ST_OK && a.seq == 50);
+  for (size_t j = 50; j < nchunks(pic); j++) chunk(s, pic, (uint16_t)j);
+  CHECK(s.handle(PKT_END, nullptr, 0).status == ST_OK && st.pics[5] == pic);
+  // a picture the board cannot decode is removed again and refused (detail 1)
+  st.undecodable = true;
+  CHECK(begin_kind(s, pic, KIND_PICTURE, 6).status == ST_OK);
+  a = send_all(s, pic);
+  CHECK(a.status == ST_INVALID && a.detail == 1 && st.pics[6].empty() && s.handle(PKT_QUERY, (const uint8_t *)"\x06", 1).crc == 0);
+  st.undecodable = false;
+  // album art: plain JPEG in RAM, <= 12 KB
+  std::string jpg = "\xFF\xD8" + std::string(5000, 'j') + "\xFF\xD9";
+  CHECK(begin_kind(s, jpg, KIND_ART, 0).status == ST_OK);
+  a = send_all(s, jpg);
+  CHECK(a.status == ST_OK && st.art == jpg);
+  std::string badjpg = "\xFF\xD8" + std::string(100, 'j') + "xx";
+  CHECK(begin_kind(s, badjpg, KIND_ART, 0).status == ST_OK);
+  CHECK(send_all(s, badjpg).status == ST_INVALID && st.art == jpg);
+  CHECK(begin_kind(s, std::string(12289, 'x'), KIND_ART, 0).status == ST_TOO_BIG);
+  st.free_b = 1000; // album art does not need flash space
+  CHECK(begin_kind(s, jpg, KIND_ART, 0).status == ST_OK);
+  s.handle(PKT_ABORT, nullptr, 0);
+}
+
 int main() {
   test_crc();
   test_parse_good();
@@ -542,6 +657,7 @@ int main() {
   test_upload_errors();
   test_upload_invalid_layout();
   test_upload_interrupted_and_resume();
+  test_pictures();
   printf("layout_core: %d checks passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

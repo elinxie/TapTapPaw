@@ -1,6 +1,7 @@
 #include "ui_ext.h"
 #include "keymap.h"
 #include "layout.h"
+#include "animation.h"
 #include "power.h"
 #include "ui/ui.h"
 #include "wifi_sync.h"
@@ -115,6 +116,11 @@ static void wifi_status_timer(lv_timer_t *t) {
 }
 #endif
 
+static void idle_style_cb(lv_event_t *e) {
+  idle_style = (uint8_t)lv_dropdown_get_selected(lv_event_get_target(e));
+  idle_style_save();
+}
+
 static void layout_reset_cb(lv_event_t *e) {
   layout_reset();
   if (lbl_layout != NULL) lv_label_set_text(lbl_layout, layout_status());
@@ -144,6 +150,7 @@ static void build_ext_screen() {
   for (uint16_t i = 0; i < sizeof(IDLE_MINUTE_CHOICES); i++) {
     if (IDLE_MINUTE_CHOICES[i] == idle_minutes) sel = i;
   }
+  add_row(scr_ext, "Waiting cat", "Sleepy (original)\nCheerful", idle_style, idle_style_cb, NULL);
   dd_idle_after = add_row(scr_ext, "After", "1 minute\n2 minutes\n5 minutes\n10 minutes\n30 minutes", sel, idle_after_cb, NULL);
   refresh_idle_rows();
 

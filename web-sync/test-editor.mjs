@@ -31,11 +31,12 @@ for (const t of TEMPLATES) {
   const ed = createEditor();
   assert.equal(ed.state.pages.length, 1);
   assert.equal(ed.toJSON().text, '{"v":1,"pg":[{"w":[]}]}');
-  for (const t of TYPES) { const r = ed.addWidget(0, t); assert.equal(r.ok, true, t); }
+  TYPES.forEach((t, i) => { if (i && i % 12 === 0) ed.addPage(); const r = ed.addWidget(Math.floor(i / 12), t); assert.equal(r.ok, true, t); if (t === 'pc') ed.setProp(r.id, 'i', 0); }); // 12 per page; the page gives a picture its slot
+  { const e2 = createEditor(); const r = e2.addWidget(0, 'pc'); assert.equal(e2.toJSON().ok, false, 'a picture widget without a picture is not sendable'); e2.setProp(r.id, 'i', 3); assert.equal(e2.toJSON().ok, true); assert.equal(JSON.parse(e2.toJSON().text).pg[0].w[0].i, 3); }
   const out = ed.toJSON();
   assert.equal(out.ok, true, out.err);
-  assert.ok(out.size < 1000, 'ten default widgets are small: ' + out.size);
-  for (const w of ed.state.pages[0].w) {
+  assert.ok(out.size < 2000, 'one of each widget is small: ' + out.size);
+  for (const w of ed.state.pages.flatMap((p) => p.w)) {
     const d = WIDGET_DEFS[w.t];
     assert.ok(w.x >= 0 && w.y >= 0 && w.x + w.w <= LAYOUT.W && w.y + w.h <= LAYOUT.H, w.t + ' inside the screen');
     assert.equal(w.w, d.w); assert.equal(w.h, d.h);
@@ -210,4 +211,14 @@ console.log('editor tests ok');
   const ed = createEditor(); ed.addWidget(0, 'tc'); ed.clearHistory();
   assert.equal(ed.canUndo(), false); assert.equal(ed.canRedo(), false); assert.equal(ed.state.pages[0].w.length, 1, 'clearHistory keeps the content');
   console.log('editor history clear ok');
+}
+{
+  // the typing cat: fixed 240x132, placed full width, valid layout
+  const ed = createEditor(); const r = ed.addWidget(0, 'ct');
+  assert.equal(r.ok, true); const w = ed.find(r.id).w;
+  assert.deepEqual([w.x, w.w, w.h], [0, 240, 132]);
+  ed.setGeom(r.id, { x: 50, w: 100 }); assert.deepEqual([ed.find(r.id).w.x, ed.find(r.id).w.w], [0, 240], 'cannot move sideways or resize');
+  assert.equal(ed.toJSON().ok, true);
+  for (const k of ['pawL', 'pawD', 'pawU']) assert.match(lib.PREVIEW_ART[k], /^data:image\/png;base64,/);
+  console.log('typing cat ok');
 }

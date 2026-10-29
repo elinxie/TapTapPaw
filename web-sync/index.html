@@ -246,6 +246,8 @@ const DEFAULT_KEYMAP = [1, 2, 1, 3, 10, 11]; // the original behaviour
 function keymapPacket(actions) { return pkt(0x08, actions.map((a) => a | 0)); }
 // WiFi mode (firmware built from the esp32dev_wifi env): credentials 0x09 (empty ssid = forget) and location 0x0A (degrees * 1e5, int32 LE)
 function wifiPacket(ssid, pass) { const s = clipUtf8(ssid || '', 32), p = clipUtf8(pass || '', 63); return pkt(0x09, [s.length, ...s, p.length, ...p]); }
+// Date packet 0x12: [year - 2000][month 1-12][day][weekday 0 = Sunday], for the date widget
+function datePacket(d) { return pkt(0x12, [d.getFullYear() - 2000, d.getMonth() + 1, d.getDate(), d.getDay()]); }
 function locationPacket(lat, lon) {
   const b = new Uint8Array(8), dv = new DataView(b.buffer);
   dv.setInt32(0, Math.round(lat * 1e5), true); dv.setInt32(4, Math.round(lon * 1e5), true);
@@ -286,7 +288,18 @@ const LAYOUT = { VERSION: 1, MAX_BYTES: 4096, MAX_PAGES: 6, MAX_WIDGETS_PAGE: 12
 const LAYOUT_ERRORS = ['ok', 'empty', 'too big', 'syntax error', 'nested too deep', 'unsupported version', 'no pages', 'too many pages', 'bad page',
   'second main page', 'too many widgets', 'unknown widget type', 'widget outside the 240x320 screen', 'bad color', 'value out of range',
   'bad text', 'text pool full', 'trailing data'];
-const WIDGET_TYPES = ['', 'ac', 'dc', 'wx', 'np', 'sb', 'tc', 'tx', 'mc', 'sh', 'sl'];
+const WIDGET_TYPES = ['', 'ac', 'dc', 'wx', 'np', 'sb', 'tc', 'tx', 'mc', 'sh', 'sl', 'ct', 'pm', 'cd', 'sw', 'dt', 'fs', 'bt', 'sp', 'aa', 'rm', 'pc', 'pt'];
+// firmware feature level each widget type needs (QUERY ack detail; firmware before Phase 3 answers 0)
+const WIDGET_LEVEL = { ct: 2, pm: 2, cd: 2, sw: 2, dt: 2, fs: 2, bt: 2, sp: 2, aa: 2, rm: 2, pc: 2, pt: 2 };
+// button actions, same order as BtnAction in sketch/src/layout_core.h. arg: what "g" means. ble: needs the Bluetooth keyboard build.
+const BTN_ACTIONS = [
+  { name: 'None' }, { name: 'Cat taps (+1 tap)' }, { name: 'Cat happy' }, { name: 'Cat sleepy' }, { name: 'Toggle C/F' }, { name: 'Mute / unmute' },
+  { name: 'Brightness step' }, { name: 'Next wallpaper' }, { name: 'Next page' }, { name: 'Previous page' }, { name: 'Pomodoro start/pause' },
+  { name: 'Pomodoro reset' }, { name: 'Focus sign on/off' }, { name: 'Stopwatch start/stop' }, { name: 'Stopwatch reset' },
+  { name: 'Spotify play/pause', page: true }, { name: 'Spotify next', page: true }, { name: 'Spotify previous', page: true },
+  { name: 'Event to the page (logged)', page: true, arg: 'event number' },
+  { name: 'Bluetooth: key / shortcut', ble: true, arg: 'key' }, { name: 'Bluetooth: media key', ble: true, arg: 'media key' },
+];
 const LAYOUT_STATUS = ['ok', 'bad packet', 'bad sequence', 'too big', 'checksum mismatch', 'unsupported', 'no space', 'flash write error', 'invalid layout', 'no upload in progress', 'incomplete'];
 const LAYOUT_FLAGS = { ACTIVE: 1, SAFE_MODE: 2, SESSION_OPEN: 4, STORED: 8 };
 const LERR = {}; LAYOUT_ERRORS.forEach((n, i) => { LERR[n] = i; });
@@ -368,12 +381,13 @@ function checkBg(b) {
   let t = 'w', idx = -1, hc = false, hd = false, e;
   for (const k of Object.keys(b)) {
     const v = b[k];
-    if (k === 't') { if (typeof v !== 'string') return 'syntax error'; if (!['w', 'b', 's', 'g'].includes(v)) return 'bad page'; t = v; }
-    else if (k === 'i') { e = intIn(v, 0, 5); if (e) return e; idx = v; }
+    if (k === 't') { if (typeof v !== 'string') return 'syntax error'; if (!['w', 'b', 's', 'g', 'i'].includes(v)) return 'bad page'; t = v; }
+    else if (k === 'i') { e = intIn(v, 0, 7); if (e) return e; idx = v; }
     else if (k === 'c') { e = colorErr(v); if (e) return e; hc = true; }
     else if (k === 'd') { e = colorErr(v); if (e) return e; hd = true; }
   }
-  if (t === 'b' && idx < 0) return 'value out of range';
+  if (t === 'b' && (idx < 0 || idx > 5)) return 'value out of range';
+  if (t === 'i' && idx < 0) return 'value out of range';
   if (t === 's' && !hc) return 'bad color';
   if (t === 'g' && !(hc && hd)) return 'bad color';
   return null;
@@ -381,7 +395,7 @@ function checkBg(b) {
 
 function checkWidget(w, st) {
   if (w === null || typeof w !== 'object' || Array.isArray(w)) return 'syntax error';
-  let type = 0, hx = false, hy = false, hw = false, hh = false, k = 0, text = null, e;
+  let type = 0, hx = false, hy = false, hw = false, hh = false, k = 0, text = null, e, p = null, ev = null, slot = null;
   const g = {};
   for (const key of Object.keys(w)) {
     const v = w[key];
@@ -399,6 +413,12 @@ function checkWidget(w, st) {
     else if (key === 'o') { e = intIn(v, 0, 255); if (e) return e; }
     else if (key === 'f' || key === 'q') { e = intIn(v, 0, 1); if (e) return e; }
     else if (key === 'c') { e = colorErr(v); if (e) return e; }
+    else if (key === 'p') { e = intIn(v, 0, 1439); if (e) return e; p = v; }
+    else if (key === 'b') { e = intIn(v, 1, 60); if (e) return e; }
+    else if (key === 'e') { e = intIn(v, 0, 63); if (e) return e; ev = v; }
+    else if (key === 'g') { e = intIn(v, 0, 65535); if (e) return e; }
+    else if (key === 'i') { e = intIn(v, 0, 7); if (e) return e; slot = v; }
+    else if (key === 'n') { e = intIn(v, 0, 31); if (e) return e; }
     else if (key === 's') {
       if (typeof v !== 'string') return 'syntax error';
       if (/[\u0000-\u001F]/.test(v) || BAD_SURROGATE.test(v)) return 'syntax error';
@@ -410,6 +430,20 @@ function checkWidget(w, st) {
   if (!(hx && hy && hw && hh)) return 'widget outside the 240x320 screen';
   if (g.x < 0 || g.y < 0 || g.w < 1 || g.h < 1 || g.x + g.w > LAYOUT.W || g.y + g.h > LAYOUT.H) return 'widget outside the 240x320 screen';
   if ((type === 10 || type === 9) && k > 1) return 'value out of range'; // slider, shape
+  const t = WIDGET_TYPES[type];
+  if (t === 'ct' && (g.w !== 240 || g.h !== 132)) return 'widget outside the 240x320 screen';
+  if (t === 'aa' && (g.w !== 96 || g.h !== 96)) return 'widget outside the 240x320 screen';
+  if (t === 'pt' && (g.w !== 160 || g.h !== 132)) return 'widget outside the 240x320 screen';
+  if (t === 'pm' && (p !== null && (p < 1 || p > 180))) return 'value out of range';
+  if (t === 'cd' && p === null) return 'value out of range';
+  if (t === 'rm' && (p !== null && (p < 5 || p > 240))) return 'value out of range';
+  if (t === 'bt') { if (ev === null || ev >= BTN_ACTIONS.length) return 'value out of range'; if (text === null || text.length === 0) return 'bad text'; }
+  if (t === 'pc' && slot === null) return 'value out of range';
+  if ((t === 'bt' || t === 'fs' || t === 'cd') && text) {
+    const n = utf8(text).length;
+    if (st.text + n + 1 > LAYOUT.MAX_TEXT_POOL) return 'text pool full';
+    st.text += n + 1;
+  }
   if (type === 7) {
     if (text === null || text.length === 0) return 'bad text';
     const n = utf8(text).length;
@@ -426,8 +460,53 @@ function layoutChunkCount(n) { return Math.ceil(n / LAYOUT.CHUNK); }
 function layoutChunkPacket(seq, bytes) { const d = bytes.subarray(seq * LAYOUT.CHUNK, (seq + 1) * LAYOUT.CHUNK); return pkt(0x0C, [seq & 0xFF, seq >> 8, ...d]); }
 const layoutEndPacket = () => pkt(0x0D, []);
 const layoutAbortPacket = () => pkt(0x0E, []);
-const layoutQueryPacket = () => pkt(0x0F, []);
-const layoutResetPacket = () => pkt(0x11, []);
+const layoutQueryPacket = (slot) => pkt(0x0F, slot === undefined ? [] : [slot]); // with a slot: that picture's crc
+const layoutResetPacket = (slot) => pkt(0x11, slot === undefined ? [] : [slot]); // with a slot: delete that picture only
+
+// ---- pictures (upload kind 1 = SJPG in a board slot, kind 2 = album art JPEG in RAM). See docs/WIDGETS.md ----
+const PIC = { SLOTS: 8, W: 240, H: 320, MAX_BYTES: 65536, ART: 96, ART_MAX: 12288, STRIP: 16 };
+// LVGL's SJPG: "_SJPG__\0" "V1.00\0", width, height, number of strips, strip height (u16 LE), each strip's size (u16), then the
+// strips, each a baseline JPEG of 16 rows (the last may be shorter). The board decodes one strip at a time.
+function sjpgAssemble(w, h, strips) {
+  const head = new Uint8Array(22 + 2 * strips.length), dv = new DataView(head.buffer);
+  head.set(new TextEncoder().encode('_SJPG__'), 0); head.set(new TextEncoder().encode('V1.00'), 8);
+  dv.setUint16(14, w, true); dv.setUint16(16, h, true); dv.setUint16(18, strips.length, true); dv.setUint16(20, PIC.STRIP, true);
+  strips.forEach((st, i) => { if (st.length > 65535) throw new Error('strip too big'); dv.setUint16(22 + 2 * i, st.length, true); });
+  const out = new Uint8Array(head.length + strips.reduce((n, st) => n + st.length, 0));
+  out.set(head, 0); let o = head.length;
+  for (const st of strips) { out.set(st, o); o += st.length; }
+  return out;
+}
+// Drop APP1..APP15 segments (Chrome writes an ICC colour profile, ~480 bytes, into every JPEG): the board ignores them and an
+// SJPG has one JPEG per 16-row strip, so they would cost ~10 KB on a full-screen picture. Everything else is kept as is.
+function jpegStripApp(j) {
+  if (j.length < 4 || j[0] !== 0xFF || j[1] !== 0xD8) return j;
+  const keep = [j.subarray(0, 2)]; let i = 2;
+  while (i + 4 <= j.length && j[i] === 0xFF) {
+    const m = j[i + 1], len = (j[i + 2] << 8) | j[i + 3];
+    if (m === 0xDA) break; // start of scan: the rest is image data
+    if (!(m >= 0xE1 && m <= 0xEF)) keep.push(j.subarray(i, i + 2 + len));
+    i += 2 + len;
+  }
+  keep.push(j.subarray(i));
+  const out = new Uint8Array(keep.reduce((n, k) => n + k.length, 0)); let o = 0;
+  for (const k of keep) { out.set(k, o); o += k.length; }
+  return out;
+}
+function sjpgInfo(u) {
+  if (!u || u.length < 22 || new TextDecoder().decode(u.subarray(0, 7)) !== '_SJPG__') return null;
+  const dv = new DataView(u.buffer, u.byteOffset, u.byteLength);
+  return { w: dv.getUint16(14, true), h: dv.getUint16(16, true), strips: dv.getUint16(18, true), stripH: dv.getUint16(20, true) };
+}
+// slots a layout refers to: picture widgets and picture backgrounds, with the size each must be encoded at
+function picturesUsed(lay) {
+  const m = new Map();
+  for (const p of lay.pg) {
+    if (p.bg && p.bg.t === 'i') m.set(p.bg.i, { w: PIC.W, h: PIC.H });
+    for (const w of (p.w || [])) if (w.t === 'pc') m.set(w.i, { w: w.w, h: w.h });
+  }
+  return m;
+}
 
 // Board -> host ack 0x10: [FF][10][12][cmd][status][detail][flags][seq u16][free_kb u16][crc u32]. Returns null if u8 is not a complete ack frame.
 function parseLayoutAck(u) {
@@ -439,12 +518,14 @@ function parseLayoutAck(u) {
 }
 
 // Upload driver: stop-and-wait with retry and resume. io = { send(u8), ack(cmd, ms) -> Promise<ack|null>, onProgress?(done,total) }
+// opts.kind / opts.slot: 0 layout (default), 1 picture into slot 0..7, 2 album art. One chunk in flight: measured on the board,
+// more than one loses bytes while it writes flash (the end checksum catches it, but the upload fails).
 async function uploadLayoutBytes(bytes, io, opts = {}) {
-  const tries = opts.tries || 3, ms = opts.timeoutMs || 1500;
-  const call = async (packet, cmd) => { for (let t = 0; t < tries; t++) { io.send(packet); const a = await io.ack(cmd, ms); if (a) return a; } return null; };
+  const tries = opts.tries || 3, ms = opts.timeoutMs || 1500, kind = opts.kind || 0, slot = opts.slot || 0;
+  const call = async (packet, cmd, wait = ms) => { for (let t = 0; t < tries; t++) { io.send(packet); const a = await io.ack(cmd, wait); if (a) return a; } return null; };
   const fail = (stage, ack) => ({ ok: false, stage, ack, message: ack ? (stage + ': ' + ack.statusName + (ack.detailName ? ' (' + ack.detailName + ')' : '')) : (stage + ': no answer from the board') });
   const total = layoutChunkCount(bytes.length);
-  let a = await call(layoutBeginPacket(bytes), 0x0B);
+  let a = await call(layoutBeginPacket(bytes, kind, slot), 0x0B);
   if (!a || a.status !== 0) return fail('begin', a);
   let seq = a.seq; // 0, or where an interrupted upload of the same layout stopped
   let guard = total * 4 + 8;
@@ -457,8 +538,12 @@ async function uploadLayoutBytes(bytes, io, opts = {}) {
     if (io.onProgress) io.onProgress(Math.min(seq, total), total);
   }
   if (seq < total) return fail('chunk', null);
-  a = await call(layoutEndPacket(), 0x0D);
-  if (!a || a.status !== 0) return fail('end', a);
+  a = await call(layoutEndPacket(), 0x0D, kind ? 6000 : ms); // pictures: the board test-decodes before it answers
+  if (!a || a.status !== 0) {
+    if (a && kind && a.status === 8) return { ok: false, stage: 'end', ack: a, message: 'the board cannot decode this picture' };
+    return fail('end', a);
+  }
+  if (kind) return a.crc === crc32(bytes) ? { ok: true, ack: a, message: 'picture stored and verified' } : { ok: false, stage: 'verify', ack: a, message: 'verify: checksum read back from the board does not match' };
   const q = await call(layoutQueryPacket(), 0x0F); // verify: the board reports the crc of the layout it stored
   if (!q || q.crc !== crc32(bytes)) return { ok: false, stage: 'verify', ack: q, message: 'verify: checksum read back from the board does not match' };
   return { ok: true, ack: q, message: 'layout stored and verified' };
@@ -477,7 +562,51 @@ const WIDGET_DEFS = {
   mc: { name: 'Mood cat', w: 200, h: 132, fixed: true, o: [] },
   sh: { name: 'Shape / divider', w: 100, h: 4, o: ['k', 'c', 'o', 'r'] },
   sl: { name: 'Slider', w: 150, h: 16, o: ['k', 'c'] },
+  ct: { name: 'Typing cat', w: 240, h: 132, fixed: true, o: [] }, // taps along with keys, buttons and the desktop app
+  pm: { name: 'Pomodoro', w: 120, h: 120, o: ['p', 'b', 'c'], def: { p: 25, b: 5 } },
+  cd: { name: 'Countdown', w: 170, h: 52, o: ['s', 'p', 'z', 'c'], def: { p: 17 * 60, s: 'Home time' } },
+  sw: { name: 'Stopwatch', w: 140, h: 36, o: ['z', 'c'] },
+  dt: { name: 'Date', w: 160, h: 22, o: ['k', 'z', 'a', 'c'] },
+  fs: { name: 'Focus sign', w: 200, h: 56, o: ['s'] },
+  bt: { name: 'Button', w: 104, h: 40, o: ['s', 'e', 'z', 'c', 'r'], def: { e: 1, s: 'Tap' } },
+  sp: { name: 'Spotify controls', w: 180, h: 44, o: ['c'] },
+  rm: { name: 'Reminder', w: 180, h: 32, o: ['k', 'p', 'z'], def: { p: 30 } },
+  pc: { name: 'Picture', w: 96, h: 96, o: ['pic'] }, // your image, encoded at the widget's size when sent
+  aa: { name: 'Album art', w: 96, h: 96, fixed: true, o: [] }, // current Spotify cover, sent by this page
+  pt: { name: 'Pet', w: 160, h: 132, fixed: true, o: ['n'], def: { n: 4 } }, // ASCII pets from claude-desktop-buddy (MIT)
 };
+// what the tappable widgets do on the board, shown in the property panel
+const WIDGET_HINT = {
+  pm: 'Tap: start / pause. Hold: reset. A beep and the cat say when work ends; the break starts by itself.',
+  sw: 'Tap: start / stop. Hold: reset.', fs: 'Tap to switch between busy and available. While it is in the layout the board LED shows it: red busy, green available.',
+  rm: 'Tap: done (the timer restarts). When it is time the board beeps, the cat smiles and a note appears.',
+  dt: 'The date comes from the web page (sent every minute). The desktop app does not send it.',
+  cd: 'Counts down to this time of day, then to the same time the next day.',
+  sp: 'Previous / play-pause / next. Needs the web page connected and signed in to Spotify (Premium).',
+  pc: 'Resize freely: the picture is cropped to fill the box and converted when you press Send. Each picture uses one of the board\'s 8 picture slots.',
+  aa: 'Shows the cover of what Spotify is playing. This page sends it when the track changes (signed in to Spotify, page connected).',
+  pt: 'Tap to pet it (hearts). It gets busy while you type, cheers when a pomodoro ends and waves at reminders. Pets by Anthropic\'s claude-desktop-buddy (MIT).',
+  ct: 'Taps along with the board keys, button widgets, the desktop app and Bluetooth keys. Blinks, falls asleep, chases the mouse paw.',
+};
+// Bluetooth keys (button action "Bluetooth: key"): HID usage ids and modifier bits; arg g = (modifiers << 8) | usage
+const HID_MODS = [['Ctrl', 1], ['Shift', 2], ['Alt / Option', 4], ['Cmd / Win', 8]];
+const HID_KEYS = (() => {
+  const k = [];
+  for (let i = 0; i < 26; i++) k.push([String.fromCharCode(65 + i), 4 + i]);
+  for (let i = 1; i <= 9; i++) k.push([String(i), 0x1D + i]);
+  k.push(['0', 0x27], ['Enter', 0x28], ['Esc', 0x29], ['Backspace', 0x2A], ['Tab', 0x2B], ['Space', 0x2C], ['-', 0x2D], ['=', 0x2E],
+    ['[', 0x2F], [']', 0x30], ['\\', 0x31], [';', 0x33], ["'", 0x34], ['`', 0x35], [',', 0x36], ['.', 0x37], ['/', 0x38]);
+  for (let i = 1; i <= 12; i++) k.push(['F' + i, 0x39 + i]);
+  k.push(['Print Screen', 0x46], ['Home', 0x4A], ['Page Up', 0x4B], ['Delete', 0x4C], ['End', 0x4D], ['Page Down', 0x4E],
+    ['Right', 0x4F], ['Left', 0x50], ['Down', 0x51], ['Up', 0x52]);
+  return k;
+})();
+const MEDIA_KEYS = ['Play / pause', 'Next track', 'Previous track', 'Volume up', 'Volume down', 'Mute'];
+function hidName(g) {
+  const mods = HID_MODS.filter(([, b]) => (g >> 8) & b).map(([n]) => n.split(' ')[0]);
+  const key = HID_KEYS.find(([, u]) => u === (g & 0xFF));
+  return [...mods, key ? key[0] : '?'].join('+');
+}
 const WALLPAPERS = ['Sunny', 'Cloudy', 'Rainy', 'Stormy', 'Snowy', 'Night'];
 // what the board shows with nothing connected is a placeholder; the preview and dry run use this sample instead
 const SAMPLE = { h: 10, m: 9, s: 30, group: 0, tempC: 21, humidity: 48, wh: 10, wm: 5, title: 'Moonlight Sonata', artist: 'Beethoven', media: 1, cpu: 37, mem: 62, batt: 80, taps: 128, mood: 0 };
@@ -486,6 +615,7 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const deepCopy = (o) => JSON.parse(JSON.stringify(o));
 const snapTo = (v, g) => (g > 1 ? Math.round(v / g) * g : Math.round(v));
 
+const TEXT_TYPES = ['tx', 'bt', 'fs', 'cd']; // widgets whose text uses the board's 512 byte label pool
 function newPage() { return { main: false, bg: { t: 'w' }, w: [] }; }
 
 // Turns a validated layout object (schema v1) into editor state with ids.
@@ -511,11 +641,13 @@ function layoutFromState(st) {
     o.w = p.w.map((w) => {
       const r = { t: w.t, x: w.x, y: w.y, w: w.w, h: w.h };
       for (const k of ['k', 'z', 'a', 'r']) if (w[k]) r[k] = w[k];
+      for (const k of ['p', 'b', 'e', 'g', 'i', 'n']) if (w[k] !== undefined && w[k] !== null) r[k] = w[k];
       if (w.o !== undefined && w.o !== 255) r.o = w.o;
       if (w.f) r.f = 1;
       if (w.q) r.q = 1;
       if (w.c) r.c = w.c;
-      if (w.t === 'tx') r.s = w.s || '';
+      if (w.t === 'tx' || w.t === 'bt') r.s = w.s || '';
+      else if ((w.t === 'fs' || w.t === 'cd') && w.s) r.s = w.s;
       return r;
     });
     return o;
@@ -552,7 +684,7 @@ function createEditor(initial) {
       return null;
     },
     total() { return st.pages.reduce((n, p) => n + p.w.length, 0); },
-    textBytes() { return st.pages.reduce((n, p) => n + p.w.reduce((m, w) => m + (w.t === 'tx' ? utf8(w.s || '').length + 1 : 0), 0), 0); },
+    textBytes() { return st.pages.reduce((n, p) => n + p.w.reduce((m, w) => m + (TEXT_TYPES.includes(w.t) && (w.s || w.t === 'tx' || w.t === 'bt') ? utf8(w.s || '').length + 1 : 0), 0), 0); },
 
     // ---- pages ----
     addPage() {
@@ -582,9 +714,11 @@ function createEditor(initial) {
       if (page.main) return { ok: false, why: 'the original screen page cannot hold widgets' };
       if (page.w.length >= LAYOUT.MAX_WIDGETS_PAGE) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_PAGE + ' widgets per page' };
       if (ed.total() >= LAYOUT.MAX_WIDGETS_TOTAL) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_TOTAL + ' widgets in total' };
-      if (t === 'tx' && ed.textBytes() + 'Text'.length + 1 > LAYOUT.MAX_TEXT_POOL) return { ok: false, why: 'label text budget is full' };
+      const defText = t === 'tx' ? 'Text' : (d.def && d.def.s) || '';
+      if (defText && ed.textBytes() + utf8(defText).length + 1 > LAYOUT.MAX_TEXT_POOL) return { ok: false, why: 'label text budget is full' };
       const off = (page.w.length % 6) * 8; // cascade so new widgets do not hide each other
       const w = { id: nextId(), t, x: clamp(snapTo((LAYOUT.W - d.w) / 2, ed.grid) + off, 0, LAYOUT.W - d.w), y: clamp(snapTo((LAYOUT.H - d.h) / 2, ed.grid) + off, 0, LAYOUT.H - d.h), w: d.w, h: d.h };
+      if (d.def) Object.assign(w, deepCopy(d.def));
       if (t === 'tx') w.s = 'Text';
       ed.edit(() => page.w.push(w));
       return { ok: true, id: w.id };
@@ -617,7 +751,7 @@ function createEditor(initial) {
       const page = st.pages[f.pi], d = WIDGET_DEFS[f.w.t];
       if (page.w.length >= LAYOUT.MAX_WIDGETS_PAGE) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_PAGE + ' widgets per page' };
       if (ed.total() >= LAYOUT.MAX_WIDGETS_TOTAL) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_TOTAL + ' widgets in total' };
-      if (f.w.t === 'tx' && ed.textBytes() + utf8(f.w.s || '').length + 1 > LAYOUT.MAX_TEXT_POOL) return { ok: false, why: 'label text budget is full' };
+      if (TEXT_TYPES.includes(f.w.t) && f.w.s && ed.textBytes() + utf8(f.w.s || '').length + 1 > LAYOUT.MAX_TEXT_POOL) return { ok: false, why: 'label text budget is full' };
       const c = Object.assign(deepCopy(f.w), { id: nextId() });
       c.x = clamp(c.x + 8, 0, LAYOUT.W - c.w); c.y = clamp(c.y + 8, 0, LAYOUT.H - c.h);
       ed.edit(() => page.w.splice(f.wi + 1, 0, c));
@@ -685,6 +819,9 @@ const TEMPLATES = [ // portrait 240x320, like the board
 ];
 
 // PREVIEW-ASSETS BEGIN (generated by scripts/make_preview_assets.py from the firmware's own images; do not edit)
+// PET_PREVIEW start (scripts/make_pet_preview.py)
+const PET_PREVIEW = [{"name":"capybara","c":"#c55531","l":["            ","  n______n  "," ( o    o ) "," (   oo   ) ","  `------'  "],"all":false},{"name":"duck","c":"#ffff00","l":["            ","    __      ","  <(o )___  ","   (  ._>   ","    `--´    "],"all":false},{"name":"goose","c":"#ffffff","l":["            ","    (>      ","    ||      ","  _(__)_    ","   ^^^^     "],"all":true},{"name":"blob","c":"#00ff83","l":["            ","    .--.    ","   (o  o)   ","   (    )   ","    `--`    "],"all":true},{"name":"cat","c":"#c55531","l":["            ","   /\\_/\\    ","  ( o   o ) ","  (  w   )  ","  (\")_(\")   "],"all":false},{"name":"dragon","c":"#ff0000","l":["            ","  /^\\  /^\\  "," <  o    o >"," (   ww   ) ","  `-vvvv-'  "],"all":true},{"name":"octopus","c":"#a400ff","l":["            ","   .----.   ","  ( o  o )  ","  (______)  ","  /\\/\\/\\/\\  "],"all":true},{"name":"owl","c":"#838583","l":["            ","   /\\  /\\   ","  ((O)(O))  ","  (  ><  )  ","   `----'   "],"all":true},{"name":"penguin","c":"#0081ff","l":["   .---.    ","  ( o>o )   "," /(     )\\  ","  `-----`   ","   J   L    "],"all":false},{"name":"turtle","c":"#00ff00","l":["            ","   _,--._   ","  ( o    o) "," /[______]\\ ","  ``    ``  "],"all":true},{"name":"snail","c":"#de1cf6","l":["  \\\\  /     ","    .--.    ","  _( oo )_  "," (___@@___) ","  ~~~~~~~~  "],"all":true},{"name":"ghost","c":"#ffffff","l":["            ","   .----.   ","  ( o    o )","  |   __   |","  ~`~``~`~  "],"all":true},{"name":"axolotl","c":"#ff61f6","l":["            ","}~(______)~{","}~( o  o )~{","  ( .--. )  ","  (_/  \\_)  "],"all":false},{"name":"cactus","c":"#00ff00","l":["            "," n  ____  n "," | |o  o| | "," |_|    |_| ","   |    |   "],"all":true},{"name":"robot","c":"#c5c2c5","l":["            ","   .[||].   ","  [ o    o ]","  [ ==== ]  ","  `------'  "],"all":true},{"name":"rabbit","c":"#ffffff","l":["    (\\_/)   ","   ( o o )  ","  =(  v  )= ","   (\")_(\")  ","            "],"all":false},{"name":"mushroom","c":"#ff0083","l":["            "," .-o-OO-o-. ","(__________)","   |o   o|  ","   |____|   "],"all":true},{"name":"chonk","c":"#ffa500","l":["            ","  /\\____/\\  "," ( o    o ) "," (   ..   ) ","  `------'  "],"all":true}];
+// PET_PREVIEW end
 const PREVIEW_ART = {
   wall0: 'data:image/jpeg;base64,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',
   wall1: 'data:image/jpeg;base64,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',
@@ -705,6 +842,9 @@ const PREVIEW_ART = {
   i3: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABQklEQVR42u2WwUoCURSGP8dciC4iaBO00LVuBBdR9AA9QOseIXcudOXeJxARXChISi9QYG0S6x1aFEErF6IQVJsbyGXmeme4x5rwh1nMcJhz5v//88+FX0ZCu98FTgFPqN8X8AC8BRUMVJHkNVltuKMNcA+c+DDjErdsYTDhz7MeUBLq2QUapoIMsBQ04ZPJhABzZcSC0BqO/7QHDoAzx0G0VPmysCm+FtK9GtRQ98AQyAkwcLMNnDBBpOMSqDuUpQNUTDmgowzsOfzoo7AMZIFjhwxMgfdYecAPeeAcSFquYQuYuRz8KmQQ1WyDyBZtdX70LBkYxToHgpAyMPABfEoOXlMNgjR/VhKtRdTdPlzD3j6QlpQgBRQNa/gKvPybn5EfisCFJuEQuNvU4CMf4z1GeVHUIGqqgPFWTrv9WB5IvgHsI4Pynz9MPwAAAABJRU5ErkJggg==',
   i4: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADI0lEQVR42sXXXYhVVRQH8N9oTo5ZYlCK9BAhYUFRWilIYSkJPqQolRZF0Wvmi5GC9CBUUFAPRQ9DREiFFFT2MYWJJjGm9AFKpqQmlmMZlWhmZuPcXtaBxebcm94ZZhYcztl7r73Xf63932uvM1r70oFuXI/PjYBMQAOHB7PIqCEA0jHcAF7FK+hMfRPxPtYMR+gPReg3xvt3fBXfnwwHgGvwcxjMz05cNpSGpuORJntcgmhmfCwew5XnYnAaFiVebIrFZzYh3A0xfjwZL8E+FDovJkD3YXIdgC2h/CVm47loV8TqxH5sD4+qY9gX4zfHeObBG6HzMBbjQLRfrgMwB/tCYQC74/uzGB+DE9H3Bx5IAB7F6Wh/n6LxS/TtTtu1Hdc224YL8XiEtZrwT3gLH9SQr3w+Dd0ZRX9fgO5olQcmoSuOmhT6nbgneAE/hseV/IbX47sPKxKQSg4EVya0IuLbCfGpWKQ39f0Q7/2YlUh4BZ6Mdn/S78E2/Jv61rYCMDMU5kUkqr1cGl7nkM5Kob0aX6exQ7i9uDcW4mlcdT65YCzuwDPYVQA4Ge8zwZOSC1txd5C3LekK7/KiJyLnv1f0n8ULuA4birHedgGMwRdpoQGsw734psbjHTWA+2POoOQ2vBWhbtQQ8lQ679WzHktw6flex4vjJCyPfC9uuj3hTSXdKUUfw7Jinbm4PE7IKNyEVXgHt7QCtK7w5KeoeKpwVglqYeSFBv7CrYmUW9P8fZEj8pqrWwG4KJi7rYbRN8Y+N/BRcCJnyypNL8L8Iv028C4W4IJWACZHxXO2OG5V9XO0MNqIJJP1XwrdqQWAv/EUxjcz/mAK8UlsTtkMxiWv90bYq0R0J36N9ndpzYOpUupP+nPqSLgMF+PNqA32pLpAeNyD1+Lq3ZXmbowt6olrXTH3wxjfjCm4qy4CExPz4ePwuNnVOT+RcFoTnSWh83xRaXWdy/mfEoVJncwNw9X+HmkCoiO255KhrBVL4/8HYsjlWBjsjvfRdDf0DgeAJ7CyqAk78SzuH4l/w76R+jccKN5tyehBzD2DPyPFftvuIv8BW/lApQbzLKUAAAAASUVORK5CYII=',
   i5: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADC0lEQVR42rWXT4hPURTHP+/NHyNlBhMiEhE2I9nKDilZCWUjFkgMmoW96VdqVpRSspdYIRt/Q2RmKAsi+ZsR2RhjZn6/+T2b760z173vvd9Mbt3ue+/ee873nO8959wH8dZsnucDJ4AB4B7Qpu8JU2uF+1o0tgEVYBjI1D8ArQ0ASIAmyTwNbPN0RC3fBHwyimvAGLBG800NWrtUcu7kecIJPWQUjwHjeu4uQh8xqBe4KxlfgGvGE/9YflwL67J6Qu+vGuHQrJkrWZkxJAMuhDjfqckJo9htOlrC+lSKEw/EQuCA5DwH1gOz7CaAZXJ3ZpQ75FXN2/VlPeBonS1ZF818YhfcDLippvFFgeudjHPAY+MlH8RiY/kkWZuNpZnp7v1KIDe4NkPjOrPvmL7NDNARNORWAYDzOQBcu272fQXmBBSmIeUrA5w3AmAHMBg4vEPKnoVJ60iAex/AZQ+AG/sC58UBccY8ywOQAhtzFiTGS0gwEows/2MOWhbY+6AoXAYDFmQeJWNKpTYMU5NoKma/G68Ca8vE6zcv9mM0HA4kIlsPzpg9TyJVNdhiin1uX0aociA6gVGt3eqFaG4biURAyAsHtac1AmKvCk9D9eJdAQUW3CiwPFIT0gaK1aR0fj/nEIaoeKu8HvNEEecWeJoqCvBCKJbva8AKoF/FaVzWtMjqCa0JubpZMqq64j0FHgFsj6ThWHcJawTYH3Bts9f96rkL+CEZn1F1GipxDrJI1hsA9gELcrw3D9gDPPTkVBITwz3yQtnrlgPsOB9W2X4NfNd8J7AK6ALata4mr6TAasyN5XeJcIx5owx9Va11FF7yT+VJk3azKfS6AWN7zRjlKP7lU+aouD1NEEUAnad2+2k6Nfe29/8BRN24vjdWI9yHRfr7cSDq01ReNTL68m5GFkS7/gFt7E/lcNpLTneR8lD5POVRETpY9hbklNp80g9sMNm01A+tRbkEOAv8zClSod6v6kjeD01SonBU9dwBbNEVvks1oUNzdeAj8Eb5/YZyvdORmuvcpPYXbtnCpdeVxPAAAAAASUVORK5CYII=',
+  pawL: 'data:image/png;base64,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',
+  pawD: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADQAAAAfCAYAAACoE+4eAAAFeElEQVR42tWYT2gUZxjGf5EJfAMpzIKHjKSQgRQcacUVeohW3Kz0oFCh6R8wnuqfg00slEgLjdaI9aYeWnuoRIRC9NCaQqG5FHdXNBuwZVa0OAEDKxgyAQMzkMB8kIGvh9ndZHU3btuspi/MHna/mfme93mf5333gyaE2WEqoOqyNicV/6ewOi0lhFBoPAcGUGgo0SaU/VZzgbX8p7vjzQMgNIHZYWLbNsk3kyQSOhII/ZC5+Tmcew7FR0WCIKjcbhgGQRC0vFImzA4zZqEEZuTyiPKf+qrRCMNQOXcnVN+B3pjRZRZfbiTfTlZKp/94v/L9xkGsFjczN5XVZVWe/XLQlHTR+1GvChdC1Yx4eN9RVmcMrJS8poUSbUI5dx31MmLk8qWygfhNAWNttpvGSr2YfTKrnjWdtXA5BbQopV5N/4gkLa16CxqKqHE33rAuwQBoAqWUIqJFCFFsXO41wBiGgf/UWxedXS0p1dLa8u8YKo0sOJN50MT6GEE0CH2/3LP+eUL6j/Wr9RiO46j+Y/2qYVMQbUJJKVELIYja7EgpERprzl4QSLx5iRDxCLVSCDKKDUJGUHzi4c14uSN9e3peqCG5KBn8fLAuGIDR66Mc/uTwmldVKMEPQwih9FF77DJNDu7fkWrUttWsN4vZbtZcOPDZAJcunm+KttzpIAYU1bYqvVXHahcYhuDa1Sv4UuYGPh3oqcuQaBOKiLpgvDkPuSibZhR+GJbKeUW5RYCmk3gNDCP+XkroPXCQLfaWlB+GpxO6fqamy8lFidVp1X3hiS9OMPTVUOOamPcaX7soAZi8k6lmRoPCvTz+AhSfSB4WfZxHHs4jn8Gvz5PJOsMTrn+6rm1bVh1AEYz9MrYq4Oe1Ntbw2odFv/wHEfevQtVvmd/HSpqq1lWyO83o9WtAODzhzmZrApJS1nxhcaZIoi1RuwXXiEw2w453djS0tjAdxKUVQRjB+C/ViShOuc/f1KrHCegwAR3QUxPurJq4P5sC2GBvtlMArusui3LlSwsFRFvj2jl39hy29QI2IyhMBYQLceYl4D4oMPdMqbquswyifJUi/V4fMiwP5Dq06qcBNrhTbk60iZw355EpFCs1XTGEmZIhNBj5P/Kr9DEozgTk3YBwKaxifez6Fdo3mpWkfv/dhZoJrlh4IkEwH7AMkdSEOzusxfqxz7gPCqlzQwOc/XYUkJiGwDQEaAJv3iu5zosaZICUkuKMjxAJJBKiGEi49OxqPdaGBsHMHMVpl+5daSb/nGT06gUKk3nSe3urWKnqXYAoJU5fVlmu3IdSQBbgm4sj9Oz9YJn2Bw5HPt7DpWu/0ftumoQhECu6uC8lQSDxF0BGIXu2b2Lkx9+wtzWio3gbH+7fife4MlDngFvlidswErsTG42U/YaN1WVj2VuwOjoxNpoIIdB1Pb4n4tZ2OzFcaazpnnQ2k82kAA4fHeTQ8cE4O0uwc2sCs9Pi51+dF25w59ZNJLvTXPrhRkNgLpw9xdhPV7A327hTbt2pWghRNSHISJb1mKs5Kex7vy8VzM9l87czlT5gdyUxLYv87XHkouTw8SEOHT2x6jY/3L8d73GRG+MTtFtbYKk+oFODR8j8Po5oE8hFuSbHWbUeki2VYM3Y934fQ6fOg6bX0JDHyS+PUJjMI4Rg9Nc87a+vcLwSuMk745z8oh+5GKwss55mHjQOA6dXdm2hiapelXx7B9u3dRNGksfTLs4DB1k6RDQ7TLyZ2IKtLpvuXWlkBO69PK5bqLiX1WVTnHbX9KBxtYcNo7HSOnMl5navwmDOMIwz5utWSmhxD6tKzLIeclLKHtZTWF32cKk8yyef2VWTE18pNFLr+5ReI2V2Wutmk38DTgqJ5dcOC+8AAAAASUVORK5CYII=',
+  pawU: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADoAAAAyCAYAAAAN6MhFAAAMTElEQVR42s2afWgcZ37HP+sbm2dgDc+AXHZcGTS9uHjUM9wuNa3WdSMJfBC5PTj7UoiMG1LlChe7pT4lV1I5F/suvtKr7ZZDutCcfbk2SPkjWKYJtnuXRs4l9aqgO+2BD48gwSNq0Vlq0Rnq5eYBTfL0j1mttNbbypKv/cGANDvPPM/39/4ysEHqfeqwllJqIYQWWaGFENrd4+rB7w7qZt/htDmSR0xbHhrgsV6NgVYJTJYnie/HtSvk8pXLlCdKiKzQF1+7uCZgf9qPHjXQTLMPXh69rL0pj1N/dSpT7Chq/67Pz8Z/ht1qr7hGVSMOffEQYRTjtNpESpHL5Sh2FDnx3IkM/1/o6ttXtZ2zNaBlVuj+k/26/2S/dve6Ws/Fulk6/tU+bbfauu+ZPl3sKGoppQa0EEIXO4oag5cx6Pw/AZnP5zUGeuDFAR3eC7XWWsdxrN09jtZzet3U3dWtb3u36/+HYagHXhrQGGhAn7twTus5/asFK6XUPU/06DhulFp8P15yr2mai3XPH/Ysc1/r3mO9GtB9z/Td+JWBtFtt3X+yXz8Kuvr21RV/Gx4Z1oDuf6FfP3KQg98b1O4eVz8yWkPlayFJX7129fOPVmVbpJ6cnNzQYTe6rnigqIUQNx5peBFZoeP78aoLoqpCGCCEWLiZgFIKlaj0PUI0/g4EM8GqoejBZzFwdto7pzcLqDH/x8CLA/rav4yuuUAYEFYVZlWBEMRKUbkyTHh9DCdngwFiXx4OHsGsMUQB/r2oaaAnvnYCf7ryOtC1qRK9Wbqp9xf3UzxQ5OYHN9fmeCVKWZRA5fpl5K0yzm63Ll0MiID4yaMAmIB/NyS/11nE2pWpXC7T/YVD+B/ddizL2hSpbgH48uEvgwFxdRm1VQpVjeoXSqFUnKorEL41gm07jTqSKEQUQTUEIE5A7rAIZiOCWUVUVavH8L15MKA0XmrbVNUNKgGD3x2kXC43YoyihaeiEKUU5GzsFotgNqw9lAIjEXUppyouUH6A2GtRqcZIA/zXfoBZCZCOTfwHh7Fdd3kJG1DY6zL61ujLwPubAfQz5y6c0z/+0Y8ZHhnmi4e+gLFN1EGqJMbYshXvH4Yw3v2A7dPTUPoAlc2CvZPk04TKmyM4n91NkigMQ9S9U3DXJ/md36eqDQzgo784QdGx2eXswhKC7Xc8IsNE/PrydruVrQx9f2i6+j/Vf9wU1R17dwzZIhGGAEOgqgqSBfUMbk2Suxdi2zbCEIishfjXG1gGCGEinzyMNzGJSiCKIlQUEd0LGZ/2YYdECJPgygj5z7mw2BMbAvFvYyuqcdfBLsJ5rdkMoJ7n0b67HSHSEDH24SRRlG4eA9FPy5jbrQYfLYTAf/cadovEfqqP+PMupevXmJwoUZooUZqpkL9wEUta2C2CaKKEaZiNO9dUPJwJls/QWmxg8xJ9QyVp6YQhCCohZE3iJMas2Ztoc4jHSwgsRFYsOaiTk4g/f56ot48wDLCyFtK2sVvSWjqKFCJrEasQoSwwRJ1hwV0fZYgVvYez28G75W2ORIUQRDWno+YUMivxA0Wo0rAgOzrwp3zUXJosqKqiVJ7EOdi1iPsSd49DcV8B13XqIOsdhGN/QvmnZVSS1qipaUR4syFCmCse7vhX+jYvMyoeKOrgbsAd/w7lKZ84XlBRW0UIK+W4/+3zqEqAygryL/Rj5wtggKoETH7nPGrKr2dDilQT7Ce6EfkiSsUE168RvfEDpMyhDFDSwv3Gt8AwcVqX76R4tzy8Ka/ryB8d2bDnzQy8OKDP/u1Z9JzGmw4I7ytMBPHfvUR7i0TaNlEYQu8RZNt8wE8BeVdGCd+8TGFfASFlQ3ghSVXTm/IQXd3YX+pNGVNVqeOrSdJuWZouLoRwRWFv+2nvY//MhlX36B8f/SFJyj1bWinIaoRtCOKarcgdNsGFodS+5kG+M4q6Pkaho7gAct5h1S7bceh+oodCovC/fgLl+6md13BZ2ZVBzjs9e5e9Kar7maGhoX/G4LT/Hz59zzxNJaySKMX2X0xgbMtS/aXik8wnGIbgk107EL+2A/XfId6Z87T/VjuGYWBsM5a22bbUrk/B2CZwHIfZH12nusVEfPY3YQvYMkv0S4XYtnJemHxK5907H1H5r9mfbDgF7DvWx7V3rqGqCidnYe6QBLMhCgUJhGFMZaZSkyiULpzH/Zxb53oz+SuAm88Tv3kJ7qUhxa9ExKtngxx98igY4vTghcGnNwz00uuXMgB9z/UhpUAYYL70CsFMgD9VJvjYI8iK1EYT4BfeQlwUzdZHtdSuqxv/9UsLHluu/gKRFbh7XEbfGf3hpvR1j3/1OCNvjOBNebitNsIUmN88h3l2EPPMOeyvDeDNhASejyXlAyDE2mAXJRvqY2/J/dXo1DdOAXDxexdf3jDQoVeHMiIrKHYUU07nrFR6W0V6JaAU+NMBIms1JA3rJZWkJrGWNOsqv8el4/c68Hz/dBiEnRsCCjA5Mfn3URRRKBaQQpBrsRqfnktd/tJUTtWkusbBE/Bulckd6Fmw7ybplW++wuEv9VAqT258JNHutp8c/qdhyhNlDh0+hN0ikNKEuRQkgJASVV1Itufz4lVVMEnjpzdRJohirKf6sHPrH7dYWYvhNy7dGL5wbt0qvOxY4OJrF/Wzf/ps2nEYu4k/GxHcCxcO/ZfPUvjdbti6YHdiPu1LaoBmA5SQCzLO2VgHe8BxcdusdUlzMZU+LDH06hBHDxRPH3ruxJkNAZ2ftRw5fATZIrldvg3CxA9SsOrNS9gzPvbu9oY18VyM9/My4iv90OYulch2E7ft4QdnYzfGuPT9S5gG9J98nvZCIfNQqruYjhw+kgEySil27trJ6FvDFHY7mFsF4qnjBNLG/3CMwPcJfZ/bEyW8xMQ6O4jZ5mCiMFE1+1U4OzYGEqC7q5vnTx4nVApMQa1D+vSGJPrgiHDkjRGcNofL199DCIvwfoxSClGtNcqkBARmPa1fJiaaAqfNRhhsjJTi1LdfwXEc+p7pA+jKZDLvb8rY8PifHddDrw4hpaSQL/CtvxkEU8LcAiizIaY+CFbUbRoDhGEiswK7RTw03tJ4ifF/H6f/ZP+aYJvmbXoom/cm7hCGIePvX6M0Pkaxo5v8bxdrRbloBNbYBKrvKIWJLUVjIf8QVOwoYllWmuTscVdtpDUt0d5jvdqbmuby2+9BoohqPaXUCSnMraIea1fQN1zH3jC4ZfvAEyXy+4r1dtNykm16tF/+eZmezi6ESFuZuaxZ7w7UQc5LbuuyFornB2nzbZNpEUiAG1rrlx8aaHA3oLCvUE/bFGlTTwhzHQYAk36wkGSsy/+sa83pB8E2fcSoGuHuSWOjmQWUqFUXUIniJt8iMFH4d0NkZOKsI9wElRCVpE7MkqI2yFoTLJlM5sy6bBTQYRgipWyQSFxLA5WKl+TFK9nq4rXtu2xkE8l9MBsRNcFQlaRa5rbWux6n1w1Uz+l0gBQpgihEZk1MIYgTqFRWaTYvA1psT6uheUe2VlqoFPgr9IAX9DNttC0Xp5u3rvnaMYGwGlLc147vB2CItAdsLG1OLwkti0ArxargoloTbf7n1dRUZE2cFrkqmsw6gGo9p/GmfAr5djAgvBfXlTGopLOa5SqXVeOzNHFWqGTKUwEya2LnUikFlYho0cRPZE1suSBBVSsqlIJQqRoz5fqBDrwwwNm/PovzWNpSufPRHVQNSFBVRFG4Ypm2lra4rUulG1Si1NEZ6QBaCrMB6IrWPz9FaLWQtbjddHgRhmD0yig3SzfpOdiD4zQOdYUBk+Pja7ZSlm2fJOBNh/gzUZ1xaZcjlZaoPbMayAdzMZE16yDXBVQplfGmvMz+4v6MP+3XQ02DXUXhuhplDSUeKRB/JsKbjuqeXWYXjyzMVa5F0jRIve5DOaNF5Ps+3Qe7G0HOhrh7XIRh1qQSL8tp9eDuSSNYUbNzfzaGCuuodMz6nk7OWhJyGl5j5+xOaUvyj7mMvDX6/soxLTht5+z5g3cCnee/c5b+rw8gpUjjarKwsVrHMcOE9COPJRpgNh1D51U2DYMKlcRs6heWN0uTndaO3OMYZqdK4ua6dclSCcc14HVpNgFy/puKnBRENY+7WKse3aekBp3CEI+LrIXVInF2OT9xHnNxdjs4rQ4yZyOzkv2F31i1YJ70/rNTCPPxJnftXAS8Uy0C+r+U3WYnppq3EwAAAABJRU5ErkJggg==',
 };
 // PREVIEW-ASSETS END
 
@@ -746,11 +886,12 @@ function feed(bytes) {
       continue;
     }
     rxBuf.push(b);
-    if (rxState === 1) { rxState = (b === 0x05 || b === 0x10) ? 2 : 0; continue; }
+    if (rxState === 1) { rxState = (b === 0x05 || b === 0x10 || b === 0x13) ? 2 : 0; continue; }
     if (rxState === 2) { rxLen = b; rxState = 3; continue; }
     if (rxBuf.length >= 3 + rxLen) {
       rxState = 0;
       if (rxBuf[1] === 0x10) { const a = parseLayoutAck(Uint8Array.from(rxBuf)); if (a) onAck(a); continue; } // layout upload ack
+      if (rxBuf[1] === 0x13) { if (rxLen === 3) onBoardEvent(rxBuf[3], rxBuf[4] | (rxBuf[5] << 8)); continue; } // button widget event
       const count = (rxBuf[5] | (rxBuf[6] << 8) | (rxBuf[7] << 16) | (rxBuf[8] << 24)) >>> 0;
       const key = rxBuf[3] === 0 ? 'Key1+Key2' : 'Key' + rxBuf[3];
       log(`key event: ${key} ${KEY_TYPES[rxBuf[4]] || 'type ' + rxBuf[4]}, lifetime taps ${count}`);
@@ -812,6 +953,7 @@ async function onTick() {
   await send(sourcePacket(SRC_WEB), 'source=web');
   await send(statusPacket({ evt: 0, cpu: 0, mem: 0, batt: battery ? Math.round(battery.level * 100) : 0, chg: battery ? battery.charging : false,
     h: d.getHours(), m: d.getMinutes(), s: d.getSeconds(), media: +$('media').value }), 'status');
+  if (ticks % 60 === 1) await send(datePacket(d), 'date'); // date widget
   if (ticks % 900 === 0) fetchWeather(true);
   if (ticks % 4 === 0) spPoll(); // driven by the worker tick so a background tab keeps polling
 }
@@ -873,7 +1015,24 @@ $('btnWifi').onclick = async () => {
 $('btnWifiForget').onclick = () => send(wifiPacket('', ''), 'wifi credentials');
 
 // ---- Spotify: Authorization Code with PKCE, no client secret. Needs an https (or http://127.0.0.1) page address ----
-const SP_SCOPES = 'user-read-currently-playing user-read-playback-state';
+const SP_SCOPES = 'user-read-currently-playing user-read-playback-state user-modify-playback-state'; // modify: board buttons (needs a new sign-in)
+// Button widgets on the board send event 0x13: Spotify control, or a numbered event that is only logged
+let spPlaying = false;
+async function onBoardEvent(action, arg) {
+  const name = (BTN_ACTIONS[action] || { name: 'action ' + action }).name;
+  if (action === 18) { log('board button: event ' + arg); return; }
+  if (action < 15 || action > 17) { log('board event: ' + name); return; }
+  if (!sp) { log('board button "' + name + '": sign in to Spotify on this page first'); return; }
+  const [method, path] = action === 15 ? ['PUT', spPlaying ? 'pause' : 'play'] : ['POST', action === 16 ? 'next' : 'previous'];
+  try {
+    if (Date.now() > sp.exp && !(await spRefresh())) return;
+    const r = await fetch('https://api.spotify.com/v1/me/player/' + path, { method, headers: { Authorization: 'Bearer ' + sp.access } });
+    if (r.status === 204 || r.status === 200 || r.status === 202) { log('Spotify: ' + path); if (action === 15) spPlaying = !spPlaying; setTimeout(spPoll, 600); }
+    else if (r.status === 403 || r.status === 401) log('Spotify refused "' + path + '" (HTTP ' + r.status + '): it needs Premium, and a new sign-in to allow playback control (Sign out, then Sign in)');
+    else if (r.status === 404) log('Spotify: no active player. Start playing on a device first.');
+    else log('Spotify ' + path + ': HTTP ' + r.status);
+  } catch (e) { log('Spotify ' + path + ' failed: ' + e.message); }
+}
 const spRedirect = location.origin + location.pathname;
 let sp = null; try { sp = JSON.parse(load('sp_tok') || 'null'); } catch (e) {}
 let spBusy = false, spLastKey = '';
@@ -929,8 +1088,12 @@ async function spPoll() {
     if (r.status === 403) { log('Spotify answered 403: the account must be on the app\'s allowlist (Spotify dashboard, User Management)'); return; }
     if (r.status === 429) { log('Spotify rate limit, slowing down'); spBusy = true; await sleep(10000); return; }
     if (r.status !== 200 && r.status !== 204) { log('Spotify answered HTTP ' + r.status); return; }
-    const info = spotifyInfo(r.status === 204 ? null : await r.json());
+    const j = r.status === 204 ? null : await r.json();
+    const info = spotifyInfo(j);
+    const imgs = j && j.item && ((j.item.album && j.item.album.images) || j.item.images); // track cover or podcast episode art
+    if (imgs && imgs.length) { const pick = imgs.filter((i) => (i.width || 300) >= PIC.ART).pop() || imgs[0]; sendAlbumArt(pick.url); } // smallest that is at least 96 px
     $('media').value = info.state;
+    spPlaying = info.state === 1;
     const key = info.title + ' ' + info.artist;
     if (key !== spLastKey) { spLastKey = key; $('title').value = info.title; $('artist').value = info.artist; await sendMusicNow(); log('Spotify: ' + (info.title ? info.title + ' - ' + info.artist : 'nothing playing')); }
   } catch (e) { log('Spotify poll failed: ' + e.message); }
@@ -1018,6 +1181,64 @@ function drawWidget(w, s, box) {
     case 'mc':
       box.style.background = 'url(' + PREVIEW_ART.cat + ') 0 0/200px 132px no-repeat';
       break;
+    case 'pm': { // ring + time + phase, like layout.cpp W_POMO (idle: shows the work length)
+      const d = Math.min(w.w, w.h), aw = Math.max(4, Math.floor(d / 12)), acc = w.c || '#FBC979';
+      el('div', 'position:absolute;left:' + (w.w - d) / 2 + 'px;top:' + (w.h - d) / 2 + 'px;width:' + d + 'px;height:' + d + 'px;border-radius:50%;box-sizing:border-box;border:' + aw + 'px solid #303030;border-top-color:' + acc + ';transform:rotate(45deg)', box);
+      const t = el('div', 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font:' + (d >= 100 ? '20px/22px' : '14px/16px') + ' Montserrat,system-ui;color:#fff', box);
+      t.innerHTML = two(w.p || 25) + ':00<span style="font-size:14px;color:#A99BB3">tap to start</span>'; break;
+    }
+    case 'cd': case 'sw': case 'dt': {
+      if (w.t !== 'dt') box.classList.add('panel');
+      let t;
+      if (w.t === 'sw') t = '00:00.0';
+      else if (w.t === 'dt') { const d = new Date(), M = d.toLocaleString('en', { month: 'long' }); t = [d.toLocaleString('en', { weekday: 'short' }) + ' ' + d.getDate() + ' ' + M.slice(0, 3), d.toISOString().slice(0, 10), M + ' ' + d.getDate()][w.k | 0]; }
+      else { let left = (w.p | 0) * 60 - (s.h * 3600 + s.m * 60 + s.s); if (left < 0) left += 86400; t = Math.floor(left / 3600) + ':' + two(Math.floor(left / 60) % 60) + ':' + two(left % 60); }
+      const lab = el('div', 'position:absolute;left:0;right:0;' + (w.t === 'cd' && w.s ? 'bottom:4px' : 'top:50%;transform:translateY(-50%)') + ';font:' + font + ' Montserrat,system-ui;color:' + col + ';text-align:' + (w.t === 'dt' ? AL[w.a | 0] : 'center'), box, 'lbl');
+      lab.textContent = t;
+      if (w.t === 'cd' && w.s) { const c = el('div', 'position:absolute;left:0;right:0;top:4px;font:14px/16px Montserrat,system-ui;color:#A99BB3;text-align:center', box, 'lbl'); c.textContent = w.s; }
+      break;
+    }
+    case 'fs': case 'rm': {
+      const busy = w.t === 'fs';
+      box.style.cssText += ';border-radius:10px;display:flex;align-items:center;justify-content:center;text-align:center;background:' + (busy ? '#B3261E' : 'rgba(0,0,0,.31)');
+      const l = el('div', 'font:' + (busy && w.h >= 40 ? '20px/22px' : font) + ' Montserrat,system-ui;color:#fff', box);
+      l.textContent = busy ? (w.s || 'Focus') : ['Water', 'Stretch', 'Breathe'][w.k | 0] + ' in ' + (w.p || 30) + ' min'; break;
+    }
+    case 'bt': {
+      box.style.cssText += ';display:flex;align-items:center;justify-content:center;overflow:hidden;box-shadow:0 2px 4px rgba(0,0,0,.4);border-radius:' + (w.r || 8) + 'px;background:' + (w.c || '#FBC979');
+      const l = el('div', 'font:' + font + ' Montserrat,system-ui;color:#000;white-space:nowrap', box); l.textContent = w.s || '';
+      break;
+    }
+    case 'sp': {
+      const bw = (w.w - 12) / 3;
+      ['\u23EE', '\u25B6', '\u23ED'].forEach((sym, k) => {
+        const b = el('div', 'position:absolute;top:0;bottom:0;left:' + k * (bw + 6) + 'px;width:' + bw + 'px;border-radius:8px;display:flex;align-items:center;justify-content:center;font:18px system-ui;color:#000;background:' + (w.c || '#FBC979'), box);
+        b.textContent = JSON.parse('"' + sym + '"');
+      });
+      break;
+    }
+    case 'pt': { // idle pose, same 6x8 text grid as the board (2x size), see scripts/make_pet_preview.py
+      const q = PET_PREVIEW[w.n | 0] || PET_PREVIEW[4];
+      const l = el('pre', 'margin:0;position:absolute;left:0;right:0;top:28px;text-align:center;font:bold 16px/16px ui-monospace,Menlo,monospace;color:' + q.c, box);
+      l.textContent = q.l.join('\n'); break;
+    }
+    case 'pc':
+      box.style.background = pics[w.i] ? 'url(' + pics[w.i].orig + ') center/cover no-repeat' : 'rgba(0,0,0,.31)';
+      if (!pics[w.i]) { box.style.cssText += ';display:flex;align-items:center;justify-content:center;color:#A99BB3;font:12px system-ui'; box.textContent = 'no picture'; }
+      break;
+    case 'aa': {
+      box.style.cssText += ';border-radius:6px;background:' + (lastArt ? 'url(' + lastArt + ') center/cover' : 'linear-gradient(135deg,#3a2a55,#1b1620)');
+      if (!lastArt) { box.style.cssText += ';display:flex;align-items:center;justify-content:center;color:#A99BB3;font:24px system-ui'; box.textContent = '\u266B'; }
+      break;
+    }
+    case 'ct': { // same parts and offsets as the board (layout.cpp W_TCAT); the paw taps once a second here
+      box.style.background = 'url(' + PREVIEW_ART.cat + ') 20px 0/200px 132px no-repeat';
+      const up = s.s % 2 === 0;
+      for (const [src, cx, cy, W, H, show] of [['pawL', 76, 44, 68, 44, true], ['pawD', -69, 27, 52, 31, !up], ['pawU', -55, 4, 58, 50, up]]) {
+        if (show) img(PREVIEW_ART[src], 'position:absolute;left:' + (120 + cx - W / 2) + 'px;top:' + (66 + cy - H / 2) + 'px', box);
+      }
+      break;
+    }
     case 'sh':
       box.style.background = w.c || '#FBC979'; box.style.opacity = ((w.o === undefined ? 255 : w.o) / 255).toFixed(3);
       box.style.borderRadius = w.k === 1 ? '50%' : (w.r | 0) + 'px'; break;
@@ -1036,6 +1257,7 @@ function pageBg(p, s) {
   if (bg.t === 'b') return '#000 url(' + PREVIEW_ART['wall' + bg.i] + ') 0 0/240px 320px';
   if (bg.t === 's') return bg.c;
   if (bg.t === 'g') return 'linear-gradient(' + bg.c + ',' + bg.d + ')';
+  if (bg.t === 'i' && pics[bg.i]) return '#000 url(' + pics[bg.i].orig + ') center/cover no-repeat';
   return '#000 url(' + PREVIEW_ART['wall' + (s.group < 6 ? s.group : 0)] + ') 0 0/240px 320px'; // weather-driven: the current group
 }
 function renderStage() {
@@ -1078,7 +1300,7 @@ function renderTabs() {
     m.onclick = () => { const r = ed.addMainPage(); if (r.ok) { curPage = 0; selId = null; renderAll(); } else flash(r.why); };
   }
 }
-const BG_NAMES = { w: 'Follows the weather (default)', b: 'Built-in wallpaper', s: 'Solid color', g: 'Gradient' };
+const BG_NAMES = { w: 'Follows the weather (default)', b: 'Built-in wallpaper', s: 'Solid color', g: 'Gradient', i: 'Picture (yours)' };
 function full6(c) { if (!c) return '#000000'; return c.length === 4 ? '#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3] : c.toLowerCase(); }
 function renderPagePanel() {
   const st = ed.state, p = st.pages[curPage], box = $('bPage');
@@ -1091,6 +1313,7 @@ function renderPagePanel() {
     if (bg.t === 's' || bg.t === 'g') h += '<div class="row"><label>' + (bg.t === 'g' ? 'Top' : 'Color') + '</label><input type="color" id="pBgC" value="' + full6(bg.c) + '">' +
       (bg.t === 'g' ? ' <label style="min-width:0">Bottom</label> <input type="color" id="pBgD" value="' + full6(bg.d) + '">' : '') + '</div>';
     if (bg.t === 'w') h += '<div class="mute">Like today: the board picks one of its 6 wallpapers from the weather.</div>';
+    if (bg.t === 'i') h += '<div class="row"><button class="ghost" id="pBgPic">' + (pics[bg.i] ? 'Choose another picture' : 'Choose a picture') + '</button> <span class="mute">' + picLabel(bg.i) + '</span></div>';
   }
   const rots = [[0, 'off'], [5, 'every 5 s'], [10, 'every 10 s'], [15, 'every 15 s'], [30, 'every 30 s'], [60, 'every minute']];
   if (!rots.some(([v]) => v === st.rot)) rots.push([st.rot, 'every ' + st.rot + ' s']);
@@ -1102,9 +1325,11 @@ function renderPagePanel() {
   if ($('pBgT')) $('pBgT').onchange = (e) => {
     const t = e.target.value, o = { t };
     if (t === 'b') o.i = 5; if (t === 's') o.c = '#1b1620'; if (t === 'g') { o.c = '#1b1620'; o.d = '#3a2a55'; }
+    if (t === 'i') { pickPicture((slot) => { ed.setBg(curPage, { t: 'i', i: slot }); renderPagePanel(); }, () => renderPagePanel()); return; }
     ed.setBg(curPage, o); renderPagePanel();
   };
   if ($('pBgI')) $('pBgI').onchange = (e) => ed.setBg(curPage, { t: 'b', i: +e.target.value });
+  if ($('pBgPic')) $('pBgPic').onclick = () => { const cur = (ed.state.pages[curPage].bg || {}).i; pickPicture((slot) => { ed.setBg(curPage, { t: 'i', i: slot }); renderAll(); }, null, cur); };
   if ($('pBgC')) $('pBgC').onchange = (e) => { const o = bgOf(); o.c = e.target.value; ed.setBg(curPage, o); };
   if ($('pBgD')) $('pBgD').onchange = (e) => { const o = bgOf(); o.d = e.target.value; ed.setBg(curPage, o); };
   $('pLeft').disabled = curPage === 0; $('pRight').disabled = curPage === st.pages.length - 1; $('pDel').disabled = st.pages.length <= 1;
@@ -1144,16 +1369,34 @@ function renderProps(force) {
   h += '<div class="row">' + ['x', 'y', 'w', 'h'].map((k) => '<label style="min-width:0">' + k + '</label> <input type="number" data-k="' + k + '"' + (d.fixed && (k === 'w' || k === 'h') ? ' disabled' : '') + '>').join(' ') + '</div>';
   if (d.fixed) h += '<div class="mute">Fixed size on the board (' + d.w + 'x' + d.h + ').</div>';
   for (const k of d.o) {
-    if (k === 's') h += opt('Text', '<input type="text" data-k="s" style="width:180px"> <span class="err" id="pErr"></span>');
+    if (k === 's') h += opt(w.t === 'fs' ? 'Busy text' : w.t === 'cd' ? 'Caption' : w.t === 'bt' ? 'Label' : 'Text', '<input type="text" data-k="s" style="width:180px" placeholder="' + (w.t === 'fs' ? 'Focus' : w.t === 'cd' ? 'none' : '') + '"> <span class="err" id="pErr"></span>');
+    if (k === 'p' && w.t === 'cd') h += opt('Count to', '<input type="time" id="pTime" value="' + two(Math.floor((w.p | 0) / 60)) + ':' + two((w.p | 0) % 60) + '">');
+    else if (k === 'p') h += opt(w.t === 'pm' ? 'Focus (min)' : 'Every (min)', '<input type="number" data-k="p" min="' + (w.t === 'pm' ? 1 : 5) + '" max="' + (w.t === 'pm' ? 180 : 240) + '">');
+    if (k === 'b') h += opt('Break (min)', '<input type="number" data-k="b" min="1" max="60">');
+    if (k === 'pic') h += '<div class="row"><button class="ghost" id="pPic">' + (pics[w.i] ? 'Choose another picture' : 'Choose a picture') + '</button> <span class="mute">' + picLabel(w.i) + '</span></div>';
+    if (k === 'e') {
+      h += opt('Action', '<select data-k="e">' + BTN_ACTIONS.map((a, i) => '<option value="' + i + '">' + a.name + (a.ble ? ' (Bluetooth build)' : a.page ? ' (web page)' : '') + '</option>').join('') + '</select>');
+      const a = BTN_ACTIONS[w.e | 0];
+      if (a.arg === 'key') {
+        h += opt('Shortcut', HID_MODS.map(([n, b]) => '<label style="min-width:0;margin-right:6px"><input type="checkbox" class="hidMod" value="' + b + '"' + (((w.g | 0) >> 8) & b ? ' checked' : '') + '> ' + n + '</label>').join('') +
+          ' <select id="hidKey">' + HID_KEYS.map(([n, u]) => '<option value="' + u + '"' + (((w.g | 0) & 0xFF) === u ? ' selected' : '') + '>' + n + '</option>').join('') + '</select>');
+        h += '<div class="mute">Sends ' + esc(hidName(w.g | 0)) + ' to the paired computer. Works only with the Bluetooth keyboard firmware.</div>';
+      } else if (a.arg === 'media key') h += opt('Media key', '<select id="hidMedia">' + MEDIA_KEYS.map((n, i) => '<option value="' + i + '"' + ((w.g | 0) === i ? ' selected' : '') + '>' + n + '</option>').join('') + '</select>');
+      else if (a.arg) h += opt('Event number', '<input type="number" data-k="g" min="0" max="65535">') + '<div class="mute">The page log shows it when the button is tapped.</div>';
+      else if (a.page) h += '<div class="mute">Runs on the web page: it must be connected (and signed in to Spotify, Premium).</div>';
+    }
+    if (k === 'n') { h += opt('Pet', sel('n', PET_PREVIEW.map((q) => q.name[0].toUpperCase() + q.name.slice(1) + (q.all ? ' (WiFi / Bluetooth build)' : '')))); if (PET_PREVIEW[w.n | 0] && PET_PREVIEW[w.n | 0].all) h += '<div class="mute">The standard firmware carries 6 pets to save space; it shows the cat instead of this one.</div>'; }
     if (k === 'f') h += opt('', '<label style="min-width:0"><input type="checkbox" data-k="f"> 24-hour</label>');
     if (k === 'q') h += opt('', '<label style="min-width:0"><input type="checkbox" data-k="q"> show seconds</label>');
     if (k === 'z') h += opt('Size', sel('z', ['Small (14 px)', 'Large (20 px)']));
     if (k === 'a') h += opt('Align', sel('a', ['Left', 'Center', 'Right']));
-    if (k === 'k') h += opt(w.t === 'wx' ? 'Unit' : w.t === 'sh' ? 'Shape' : 'Controls', sel('k', w.t === 'wx' ? ['Board setting', '°C', '°F'] : w.t === 'sh' ? ['Rectangle', 'Ellipse'] : ['Brightness', 'Volume']));
+    if (k === 'k') h += opt({ wx: 'Unit', sh: 'Shape', dt: 'Format', rm: 'Reminder' }[w.t] || 'Controls', sel('k', { wx: ['Board setting', '°C', '°F'], sh: ['Rectangle', 'Ellipse'], dt: ['Thu 29 Oct', '2026-10-29', 'October 29'], rm: ['Drink water', 'Stand and stretch', 'Breathe'] }[w.t] || ['Brightness', 'Volume']));
     if (k === 'c') h += opt('Color', '<input type="color" data-k="c"> <button class="ghost" id="pCDef" style="padding:3px 8px;font-size:12px">default</button>');
     if (k === 'o') h += opt('Opacity', '<input type="range" min="0" max="255" data-k="o">');
     if (k === 'r') h += opt('Corners', '<input type="number" min="0" max="120" data-k="r">');
   }
+  if (WIDGET_HINT[w.t]) h += '<div class="mute" style="margin-top:6px">' + WIDGET_HINT[w.t] + '</div>';
+  if (WIDGET_LEVEL[w.t]) h += '<div class="mute">Needs firmware from Phase 3 or later.</div>';
   h += '<div class="row"><button class="ghost" id="pDup">Duplicate</button><button class="ghost" id="pRm">Delete</button></div>';
   h += '<div class="row"><span class="mute">Order</span> <button class="ghost" id="zF">To front</button><button class="ghost" id="zU">Up</button><button class="ghost" id="zD">Down</button><button class="ghost" id="zB">To back</button></div>';
   box.innerHTML = h;
@@ -1166,13 +1409,29 @@ function renderProps(force) {
       i.oninput = () => { const r = ed.setProp(selId, 's', i.value); $('pErr').textContent = r.ok ? '' : r.why; i.style.borderColor = r.ok ? '' : 'var(--bad)'; };
     } else if (i.type === 'checkbox') i.onchange = () => { ed.begin(); ed.setProp(selId, k, i.checked ? 1 : 0); ed.end(); };
     else if (i.type === 'color' || i.type === 'range') { i.oninput = () => { ed.begin(); ed.setProp(selId, k, i.type === 'range' ? +i.value : i.value); }; i.onchange = () => ed.end(); }
+    else if (k === 'e') i.onchange = () => { ed.begin(); ed.setProp(selId, 'e', +i.value); const a = BTN_ACTIONS[+i.value]; ed.setProp(selId, 'g', a.arg === 'key' ? 0x0804 /* Cmd+A */ : 0); ed.end(); renderProps(true); };
+    else if (k === 'n') i.onchange = () => { ed.begin(); ed.setProp(selId, 'n', +i.value); ed.end(); renderProps(true); };
     else i.onchange = () => { ed.begin(); ed.setProp(selId, k, +i.value); ed.end(); };
   });
+  if ($('pPic')) $('pPic').onclick = () => pickPicture((slot) => { ed.begin(); ed.setProp(selId, 'i', slot); ed.end(); renderProps(true); }, null, w.i);
+  if ($('pTime')) $('pTime').onchange = (e) => { const [hh, mm] = e.target.value.split(':').map(Number); if (isFinite(hh) && isFinite(mm)) { ed.begin(); ed.setProp(selId, 'p', hh * 60 + mm); ed.end(); } };
+  const setHid = () => { let g = +$('hidKey').value; box.querySelectorAll('.hidMod').forEach((c) => { if (c.checked) g |= (+c.value) << 8; }); ed.begin(); ed.setProp(selId, 'g', g); ed.end(); renderProps(true); };
+  if ($('hidKey')) { $('hidKey').onchange = setHid; box.querySelectorAll('.hidMod').forEach((c) => (c.onchange = setHid)); }
+  if ($('hidMedia')) $('hidMedia').onchange = (e) => { ed.begin(); ed.setProp(selId, 'g', +e.target.value); ed.end(); };
   if ($('pCDef')) $('pCDef').onclick = () => { ed.begin(); ed.setProp(selId, 'c', ''); ed.end(); renderProps(true); };
   $('pDup').onclick = dupSel; $('pRm').onclick = delSel;
   $('zF').onclick = () => ed.z(selId, 'front'); $('zU').onclick = () => ed.z(selId, 'up'); $('zD').onclick = () => ed.z(selId, 'down'); $('zB').onclick = () => ed.z(selId, 'back');
 }
-function dupSel() { if (!selId) return; const r = ed.duplicate(selId); if (r.ok) { selId = r.id; renderAll(); } else flash(r.why); }
+function dupSel() {
+  if (!selId) return;
+  const src = ed.find(selId).w;
+  let slot = null;
+  if (src.t === 'pc') { slot = freeSlot(); if (slot === null) { flash('all 8 picture slots are in use'); return; } if (pics[src.i]) { pics[slot] = { name: pics[src.i].name, orig: pics[src.i].orig }; savePics(); } }
+  const r = ed.duplicate(selId);
+  if (!r.ok) { flash(r.why); return; }
+  if (slot !== null) { ed.begin(); ed.setProp(r.id, 'i', slot); ed.end(); }
+  selId = r.id; renderAll();
+}
 function delSel() { if (!selId) return; ed.remove(selId); selId = null; renderAll(); }
 
 function renderPalette() {
@@ -1181,14 +1440,21 @@ function renderPalette() {
   for (const t of Object.keys(WIDGET_DEFS)) {
     const b = el('button', '', p); b.textContent = '+ ' + WIDGET_DEFS[t].name; b.disabled = main;
     b.title = main ? 'The original screen page cannot hold widgets: pick or add another page' : 'Add to page ' + (curPage + 1);
-    b.onclick = () => { const r = ed.addWidget(curPage, t); if (r.ok) { selId = r.id; renderAll(); } else flash(r.why); };
+    b.onclick = () => {
+      if (t === 'pc') { // pick the image first, then place the widget with its slot
+        pickPicture((slot) => { const r = ed.addWidget(curPage, 'pc'); if (!r.ok) { flash(r.why); return; } ed.begin(); ed.setProp(r.id, 'i', slot); ed.end(); selId = r.id; renderAll(); });
+        return;
+      }
+      const r = ed.addWidget(curPage, t); if (r.ok) { selId = r.id; renderAll(); } else flash(r.why);
+    };
   }
 }
 function renderMeter() {
   const out = ed.toJSON(), st = ed.state;
   const size = out.ok ? out.size : new TextEncoder().encode(out.text).length;
   $('bMeter').innerHTML = ['<b>' + size + '</b> / ' + LAYOUT.MAX_BYTES + ' bytes', '<b>' + ed.total() + '</b> / ' + LAYOUT.MAX_WIDGETS_TOTAL + ' widgets',
-    '<b>' + st.pages.length + '</b> / ' + LAYOUT.MAX_PAGES + ' pages', 'label text <b>' + ed.textBytes() + '</b> / ' + LAYOUT.MAX_TEXT_POOL].join(' &middot; ') +
+    '<b>' + st.pages.length + '</b> / ' + LAYOUT.MAX_PAGES + ' pages', 'label text <b>' + ed.textBytes() + '</b> / ' + LAYOUT.MAX_TEXT_POOL,
+    'pictures <b>' + picturesUsed(ed.toLayout()).size + '</b> / ' + PIC.SLOTS + (boardFreeKb !== null ? ' (board: ' + boardFreeKb + ' KB free)' : '')].join(' &middot; ') +
     ' &middot; ' + (out.ok ? '<span class="ok">ready to send</span>' : '<span class="bad">not valid: ' + esc(out.err) + '</span>');
   $('bSend').disabled = !out.ok || sending;
 }
@@ -1298,6 +1564,116 @@ $('bDelSaved').onclick = () => {
   delete list[n]; store('layouts', JSON.stringify(list)); renderSaved();
 };
 
+// ---- pictures: kept in this browser (localStorage "ttp_pics"), encoded for the board when sent ----
+let pics = {}, boardFreeKb = null, lastArt = null, lastArtUrl = '', artBusy = false;
+try { pics = JSON.parse(load('pics') || '{}') || {}; } catch (e) { pics = {}; }
+function savePics() { try { localStorage.setItem('ttp_pics', JSON.stringify(pics)); } catch (e) { flash('the browser has no room left to keep pictures: delete some saved layouts or pictures'); } }
+function picLabel(slot) { const p = pics[slot]; return p ? esc(p.name || 'picture') + (p.enc ? ', ' + Math.ceil(p.enc.size / 1024) + ' KB on the board' : '') : 'none chosen'; }
+function freeSlot(except) {
+  const used = picturesUsed(ed.toLayout());
+  for (let i = 0; i < PIC.SLOTS; i++) if (!used.has(i) && !pics[i]) return i;
+  for (let i = 0; i < PIC.SLOTS; i++) if (!used.has(i) && i !== except) { delete pics[i]; return i; } // reuse a picture nothing shows
+  return null;
+}
+function readImage(file) {
+  return new Promise((resolve, reject) => { const u = URL.createObjectURL(file), im = new Image(); im.onload = () => { URL.revokeObjectURL(u); resolve(im); }; im.onerror = () => { URL.revokeObjectURL(u); reject(new Error('not an image this browser can read')); }; im.src = u; });
+}
+function coverDraw(ctx, im, w, h) { // fill w x h, crop what sticks out (like CSS background-size: cover)
+  const sc = Math.max(w / im.width, h / im.height), dw = im.width * sc, dh = im.height * sc;
+  ctx.imageSmoothingQuality = 'high'; ctx.drawImage(im, (w - dw) / 2, (h - dh) / 2, dw, dh);
+}
+// pick a file, keep a copy (longest side 480 px) as the source for every size it is later encoded at
+function pickPicture(done, cancelled, reuseSlot) {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*';
+  inp.onchange = async () => {
+    const f = inp.files[0]; if (!f) { if (cancelled) cancelled(); return; }
+    try {
+      const im = await readImage(f), sc = Math.min(1, 480 / Math.max(im.width, im.height));
+      const c = document.createElement('canvas'); c.width = Math.round(im.width * sc); c.height = Math.round(im.height * sc);
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      const slot = reuseSlot !== undefined && reuseSlot !== null ? reuseSlot : freeSlot();
+      if (slot === null) { flash('all 8 picture slots are in use: remove a picture widget or background first'); if (cancelled) cancelled(); return; }
+      pics[slot] = { name: f.name.slice(0, 40), orig: c.toDataURL('image/jpeg', 0.85) };
+      savePics(); done(slot);
+    } catch (e) { flash('could not read the picture: ' + e.message); if (cancelled) cancelled(); }
+  };
+  inp.click();
+}
+async function jpegOf(canvas, q) { const b = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', q)); return new Uint8Array(await b.arrayBuffer()); }
+// Encode slot's picture at w x h as SJPG (16-row baseline JPEG strips), lowering quality until it fits the budget
+async function encodePicture(slot, w, h) {
+  const p = pics[slot]; if (!p) throw new Error('picture slot ' + slot + ' is empty');
+  if (p.enc && p.enc.w === w && p.enc.h === h) return Uint8Array.from(atob(p.enc.b64), (c) => c.charCodeAt(0));
+  const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('stored picture is damaged')); i.src = p.orig; });
+  const full = document.createElement('canvas'); full.width = w; full.height = h;
+  const fctx = full.getContext('2d'); fctx.fillStyle = '#000'; fctx.fillRect(0, 0, w, h); coverDraw(fctx, im, w, h);
+  const budget = Math.max(6000, Math.round(46000 * (w * h) / (PIC.W * PIC.H))); // a full screen aims at ~45 KB
+  let bytes = null;
+  for (const q of [0.82, 0.72, 0.62, 0.52, 0.42, 0.32]) {
+    const strips = [];
+    for (let y = 0; y < h; y += PIC.STRIP) {
+      const sh = Math.min(PIC.STRIP, h - y), c = document.createElement('canvas'); c.width = w; c.height = sh;
+      c.getContext('2d').drawImage(full, 0, y, w, sh, 0, 0, w, sh);
+      strips.push(jpegStripApp(await jpegOf(c, q)));
+    }
+    bytes = sjpgAssemble(w, h, strips);
+    if (bytes.length <= budget) break;
+  }
+  if (bytes.length > PIC.MAX_BYTES) throw new Error('picture is still ' + Math.ceil(bytes.length / 1024) + ' KB after compression (max 64 KB)');
+  let bin = ''; for (let i = 0; i < bytes.length; i += 8192) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  p.enc = { w, h, size: bytes.length, crc: crc32(bytes), b64: btoa(bin) }; savePics();
+  return bytes;
+}
+// Bring the board's pictures in line with the layout: upload changed ones, delete ones nothing shows
+async function syncPictures(lay, io, progress) {
+  const used = picturesUsed(lay);
+  for (const [slot, sz] of used) if (!pics[slot]) return { ok: false, message: 'picture ' + (slot + 1) + ' has no image chosen' };
+  let need = 0; const work = [];
+  for (const [slot, sz] of used) {
+    progress('preparing picture ' + (work.length + 1) + ' of ' + used.size);
+    const bytes = await encodePicture(slot, sz.w, sz.h);
+    io.send(layoutQueryPacket(slot)); const q = await io.ack(0x0F, 1500);
+    if (!q) return { ok: false, message: ackText(null) };
+    boardFreeKb = q.freeKb;
+    if (q.crc !== crc32(bytes)) { work.push([slot, bytes]); need += bytes.length; }
+  }
+  for (let slot = 0; slot < PIC.SLOTS; slot++) { // free the board's unused slots first, so new pictures have room
+    if (used.has(slot)) continue;
+    io.send(layoutQueryPacket(slot)); const q = await io.ack(0x0F, 1500);
+    if (q && q.crc !== 0) { io.send(layoutResetPacket(slot)); await io.ack(0x11, 2000); log('removed unused picture ' + (slot + 1) + ' from the board'); }
+  }
+  io.send(layoutQueryPacket()); const q = await io.ack(0x0F, 1500); if (q) boardFreeKb = q.freeKb;
+  if (q && need / 1024 > q.freeKb - 8) return { ok: false, message: 'the pictures need ' + Math.ceil(need / 1024) + ' KB but the board has ' + q.freeKb + ' KB free (it keeps 8 KB spare). Use fewer or smaller pictures.' };
+  let n = 0;
+  for (const [slot, bytes] of work) {
+    n++;
+    const r = await uploadLayoutBytes(bytes, Object.assign({}, io, { onProgress: (d, t) => progress('picture ' + n + ' of ' + work.length + ': ' + Math.round(100 * d / t) + '%', d / t) }), { kind: 1, slot, timeoutMs: 1500, tries: 3 });
+    if (!r.ok) return { ok: false, message: 'picture ' + (slot + 1) + ': ' + r.message };
+    log('picture ' + (slot + 1) + ' sent, ' + bytes.length + ' bytes');
+  }
+  return { ok: true, sent: work.length };
+}
+// Album art: when Spotify's track changes and the layout shows album art, send the cover (96x96 JPEG, board RAM only)
+async function sendAlbumArt(url) {
+  if (!url || url === lastArtUrl || artBusy || sending || !active || !picturesOrArtShown()) return;
+  artBusy = true; lastArtUrl = url;
+  try {
+    const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status); // i.scdn.co allows reading (CORS *)
+    const im = await createImageBitmap(await r.blob());
+    const c = document.createElement('canvas'); c.width = c.height = PIC.ART; coverDraw(c.getContext('2d'), im, PIC.ART, PIC.ART);
+    let bytes = null; for (const q of [0.8, 0.65, 0.5]) { bytes = jpegStripApp(await jpegOf(c, q)); if (bytes.length <= PIC.ART_MAX) break; }
+    lastArt = c.toDataURL('image/jpeg', 0.8); renderStage();
+    if (bytes.length > PIC.ART_MAX) throw new Error('cover too big');
+    const res = await uploadLayoutBytes(bytes, boardIo(), { kind: 2, timeoutMs: 1500, tries: 2 });
+    log(res.ok ? 'album art sent (' + bytes.length + ' bytes)' : 'album art not sent: ' + res.message);
+  } catch (e) { log('album art: ' + e.message); }
+  artBusy = false;
+}
+// for checking things from the browser console (and the automated page tests): window.ttpDebug
+window.ttpDebug = { get pics() { return pics; }, encodePicture, syncPictures, sendAlbumArt, editor: () => ed, boardIo };
+function picturesOrArtShown() { return ed.toLayout().pg.some((p) => (p.w || []).some((w) => w.t === 'aa')); }
+function layoutLevel(lay) { let n = 0; for (const p of lay.pg) for (const w of (p.w || [])) n = Math.max(n, WIDGET_LEVEL[w.t] || 0); for (const p of lay.pg) if (p.bg && p.bg.t === 'i') n = Math.max(n, 2); return n; }
+function newWidgetNames(lay, have) { const s = new Set(); for (const p of lay.pg) for (const w of (p.w || [])) if ((WIDGET_LEVEL[w.t] || 0) > have) s.add(WIDGET_DEFS[w.t] ? WIDGET_DEFS[w.t].name : w.t); return [...s].join(', ') || 'picture background'; }
 // ---- talking to the board: acks (0x10) arrive through feed() ----
 const ackQueue = [], ackWaiters = [];
 function onAck(a) {
@@ -1314,14 +1690,16 @@ function waitAck(cmd, ms) {
   });
 }
 // Dry run: a small simulated board, so the whole upload can be watched (and tried) without hardware
-const sim = { open: false, total: 0, crc: 0, data: [], stored: null, storedCrc: 0 };
+const sim = { open: false, total: 0, crc: 0, data: [], stored: null, storedCrc: 0, kind: 0, slot: 0, pics: {}, used: 0 };
 function simHandle(u) {
   const id = u[1], p = Array.from(u.subarray(3));
   const mk = (status, detail = 0) => ({ cmd: id, status, statusName: LAYOUT_STATUS[status], detail, detailName: status === 8 ? LAYOUT_ERRORS[detail] : '',
-    active: !!sim.stored, stored: !!sim.stored, safeMode: false, sessionOpen: sim.open, seq: Math.ceil(sim.data.length / LAYOUT.CHUNK), freeKb: 200, crc: sim.storedCrc });
+    active: !!sim.stored, stored: !!sim.stored, safeMode: false, sessionOpen: sim.open, seq: Math.ceil(sim.data.length / LAYOUT.CHUNK),
+    freeKb: 200 - Math.ceil(Object.values(sim.pics).reduce((n, b) => n + b.length, 0) / 1024), crc: sim.storedCrc });
   if (id === 0x0B) {
     const t = p[3] | (p[4] << 8) | (p[5] << 16), c = (p[7] | (p[8] << 8) | (p[9] << 16) | (p[10] << 24)) >>> 0;
-    if (!(sim.open && sim.total === t && sim.crc === c)) Object.assign(sim, { open: true, total: t, crc: c, data: [] });
+    if (p[0] > 2 || (p[0] === 1 && p[1] >= PIC.SLOTS)) return mk(1);
+    if (!(sim.open && sim.total === t && sim.crc === c && sim.kind === p[0] && sim.slot === p[1])) Object.assign(sim, { open: true, total: t, crc: c, data: [], kind: p[0], slot: p[1] });
     return mk(0);
   }
   if (id === 0x0C) {
@@ -1335,13 +1713,19 @@ function simHandle(u) {
     if (!sim.open) return mk(9);
     if (sim.data.length !== sim.total) return mk(10);
     sim.open = false;
-    const bytes = Uint8Array.from(sim.data), v = validateLayout(new TextDecoder().decode(bytes));
+    const bytes = Uint8Array.from(sim.data);
     if (crc32(bytes) !== sim.crc) return mk(4);
+    if (sim.kind === 1) { if (!sjpgInfo(bytes)) return mk(8, 1); sim.pics[sim.slot] = bytes; return Object.assign(mk(0), { crc: sim.crc }); }
+    if (sim.kind === 2) { if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return mk(8, 1); return Object.assign(mk(0), { crc: sim.crc }); }
+    const v = validateLayout(new TextDecoder().decode(bytes));
     if (!v.ok) return mk(8, v.code);
     sim.stored = bytes; sim.storedCrc = sim.crc; return mk(0);
   }
   if (id === 0x0E) { sim.open = false; sim.data = []; return mk(0); }
+  if (id === 0x11 && p.length === 1) { delete sim.pics[p[0]]; return Object.assign(mk(0), { crc: 0 }); }
   if (id === 0x11) { sim.stored = null; sim.storedCrc = 0; return mk(0); }
+  if (id === 0x0F && p.length === 1) return Object.assign(mk(0, 2), { crc: sim.pics[p[0]] ? crc32(sim.pics[p[0]]) : 0 });
+  if (id === 0x0F) return mk(0, 2); // feature level 2
   return mk(0);
 }
 const PKT_NAMES = { 0x0B: 'begin', 0x0C: 'chunk', 0x0D: 'end', 0x0E: 'abort', 0x0F: 'query', 0x11: 'reset' };
@@ -1359,16 +1743,30 @@ function boardIo() {
 }
 function ackText(a) {
   if (!a) return 'No answer from the board. Is it running firmware with the layout engine (PR #7 or later)?';
-  return [a.active ? 'custom layout active' : 'built-in screens', a.stored ? 'layout stored' : 'no layout stored', a.safeMode ? 'SAFE MODE (layout ignored)' : '', a.freeKb + ' KB free'].filter(Boolean).join(', ');
+  return [a.active ? 'custom layout active' : 'built-in screens', a.stored ? 'layout stored' : 'no layout stored', a.safeMode ? 'SAFE MODE (layout ignored)' : '', a.freeKb + ' KB free',
+    a.cmd === 0x0F ? 'firmware feature level ' + a.detail : ''].filter(Boolean).join(', ');
 }
 function boardReady() { if (!active) { flash('Connect to the board first, or press Dry run to try it without one.'); return false; } return true; }
 $('bSend').onclick = async () => {
   if (sending || !boardReady()) return;
   const o = ed.toJSON(); if (!o.ok) { flash('not valid: ' + o.err); return; }
+  const need = layoutLevel(ed.toLayout());
+  if (need > 0) { // ask the firmware what it can draw before sending widgets it does not know
+    const io = boardIo(); ackQueue.length = 0;
+    io.send(layoutQueryPacket()); const q = await io.ack(0x0F, 1500);
+    if (!q) { setSend(ackText(null), 'bad'); return; }
+    if (!(q.flags & 64) && ed.toLayout().pg.some((pg) => (pg.w || []).some((x) => x.t === 'pt' && PET_PREVIEW[x.n | 0] && PET_PREVIEW[x.n | 0].all))) log('note: this firmware carries 6 pets; the others show the cat (WiFi / Bluetooth builds carry all 18)');
+    if (q.detail < need) { setSend('This layout uses widgets the board firmware does not have yet (' + newWidgetNames(ed.toLayout(), q.detail) + '). Flash the newer firmware first.', 'bad'); return; }
+  }
   sending = true; renderMeter(); $('bProg').hidden = false; $('bProg').value = 0;
   setSend('sending ' + o.size + ' bytes' + (dry ? ' to the simulated board' : '') + '...');
   ackQueue.length = 0;
   try {
+    if (picturesUsed(ed.toLayout()).size || need > 0) { // pictures first, so the layout never points at a missing one for long
+      const pr = await syncPictures(ed.toLayout(), boardIo(), (msg, f) => { setSend(msg); if (f !== undefined) $('bProg').value = f; });
+      if (!pr.ok) { setSend('Not sent: ' + pr.message + '. The board keeps its previous layout.', 'bad'); sending = false; renderMeter(); return; }
+      $('bProg').value = 0;
+    }
     const io = Object.assign(boardIo(), { onProgress: (d, t) => { $('bProg').value = d / t; setSend('sending: chunk ' + d + ' of ' + t); } });
     const r = await uploadLayoutBytes(o.bytes, io, { timeoutMs: 1500, tries: 3 });
     if (r.ok) { $('bProg').value = 1; setSend((dry ? 'Dry run: simulated board stored it. ' : 'Sent and verified. ') + 'Board: ' + ackText(r.ack) + '.', 'ok'); log('layout ' + (dry ? '(dry run) ' : '') + 'sent and verified, ' + o.size + ' bytes, crc ' + crc32(o.bytes).toString(16).padStart(8, '0')); }
@@ -1382,6 +1780,7 @@ $('bVerify').onclick = async () => {
   const io = boardIo(); ackQueue.length = 0;
   io.send(layoutQueryPacket()); const a = await io.ack(0x0F, 1500);
   if (!a) { setSend(ackText(null), 'bad'); return; }
+  boardFreeKb = a.freeKb; renderMeter();
   const o = ed.toJSON(), same = o.ok && a.crc !== 0 && a.crc === crc32(o.bytes);
   setSend('Board: ' + ackText(a) + '. ' + (a.crc === 0 ? 'No layout on the board.' : same ? 'It has exactly the layout shown here.' : 'It has a different layout from the one shown here.'), same ? 'ok' : 'mute');
 };

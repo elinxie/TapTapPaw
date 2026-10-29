@@ -20,6 +20,8 @@ const String version = String(firmware_version) + " | " __DATE__ "-" __TIME__;
 #include "animation.h"
 #include "keymap.h"
 #include "layout.h"
+#include "pets/pets.h"
+void ble_keys_begin(); // ble_keys.cpp
 #include "power.h"
 #include "ui/ui.h"
 #include "ui_ext.h"
@@ -237,6 +239,8 @@ static void paw_tap(bool flush_serial) {
   // paw up
   lv_obj_clear_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
+  layout_sync_cat(); // a typing cat widget on a custom page shows the same paw
+  pets_busy(); // ASCII pets type along
   if (!flush_serial) {
     lv_task_handler(); // draw the "up" frame before the delay (serial path redraws while flushing)
   }
@@ -252,6 +256,7 @@ static void paw_tap(bool flush_serial) {
   // paw down
   lv_obj_clear_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
+  layout_sync_cat();
   last_sleep_check = millis(); // reset sleepy timer on key event
 }
 
@@ -403,6 +408,10 @@ static void run_key_action(uint8_t action) {
   }
 }
 
+// used by the layout engine (layout.cpp): button widgets run the same actions as the physical keys
+void board_key_action(uint8_t key_action) { run_key_action(key_action); }
+void ui_toast(const char *text, uint32_t ms) { show_toast(text, ms); }
+
 static void handle_key_event(const KeyEvent &ev) {
   log_i("key event: key=%u type=%u", ev.key, ev.type);
   if (ev.type < KEY_EVT_PRESS || ev.type > KEY_EVT_COMBO_LONG) return;
@@ -452,6 +461,26 @@ static void apply_weather(uint8_t weather_group, int8_t temp_c, uint8_t humidity
 // Hosts that never send it (the desktop app) stay on "USB app"; the web page sends it every second.
 enum DataSource : uint8_t { SRC_NONE = 0, SRC_USB_APP = 1, SRC_WEB = 2, SRC_WIFI = 3 };
 static uint8_t data_source = SRC_USB_APP;
+
+// Board -> host event from a button widget: [0xFF] [0x13] [len=3] [action] [arg lo] [arg hi]   (layout_core.h BtnAction)
+// Only sent to the web page (it tags itself with source 0x07 = 2); the desktop app does not know this packet.
+void host_send_event(uint8_t action, uint16_t arg) {
+  if (!app_connected || data_source != SRC_WEB) {
+    show_toast("needs the web page connected", 2000);
+    return;
+  }
+  uint8_t pkt[6] = {0xFF, 0x13, 3, action, (uint8_t)(arg & 0xFF), (uint8_t)(arg >> 8)};
+  Serial.write(pkt, sizeof pkt);
+}
+
+// RGB LED: a focus sign in the layout shows busy (red) / available (green); otherwise green = host connected, red = none.
+void status_led_update() {
+  if (power_state() == POWER_ASLEEP) return; // stays off while the display sleeps
+  int8_t f = layout_focus_led();
+  bool red = f >= 0 ? f == 1 : !app_connected;
+  if (red) led_color(0, 1, 1);
+  else led_color(1, 0, 1);
+}
 
 static void show_source() {
   const char *txt = LV_SYMBOL_USB;
@@ -527,6 +556,8 @@ void serial_parse(byte b) {
     } else if (packet[1] == 0x09 || packet[1] == 0x0A) { // WiFi credentials / location
       packetLength = packet[2] + 3;
     } else if (layout_packet_id(packet[1])) { // layout upload (0x0B..0x0F, 0x11), see docs/WIDGETS.md
+      packetLength = packet[2] + 3;
+    } else if (packet[1] == 0x12) { // date
       packetLength = packet[2] + 3;
     }
 
@@ -693,6 +724,12 @@ void serial_parse(byte b) {
       // Layout upload: [0xFF][0x0B..0x0F | 0x11][len][payload]. Answered with an ack packet 0x10 (layout_core.h).
     } else if (layout_packet_id(packet[1])) {
       layout_packet(packet, packetLength);
+
+      // Date: [0xFF][0x12][len=4][year - 2000][month 1-12][day 1-31][weekday 0 = Sunday]
+    } else if (packet[1] == 0x12) {
+      if (packet[2] == 4 && packet[4] >= 1 && packet[4] <= 12 && packet[5] >= 1 && packet[5] <= 31 && packet[6] <= 6) {
+        layout_feed_date(2000 + packet[3], packet[4], packet[5], packet[6]);
+      }
     } // else packet  type is 0x02 (music), which is handled above
     // Reset packet index for next frame
     packetIndex = 0;
@@ -809,7 +846,9 @@ void setup() {
   power_load(); // idle behaviour setting
   ui_ext_init(); // "More >" button + extra settings screen
   layout_begin(boot_held_at_power_up); // custom widget layout from LittleFS, with safe mode (layout.cpp)
+  pet_init(); // tap the cat to pet it; waiting style setting
   wifi_sync_begin(); // WiFi mode task (no-op in the normal build)
+  ble_keys_begin(); // Bluetooth keyboard (esp32dev_ble build only, else a no-op)
   
   //test sound effect
   /*
@@ -834,10 +873,12 @@ void loop() {
   lv_task_handler();
   layout_poll(); // apply a layout that was just uploaded
   autoDim(); // handle auto dimming based on ambient light
-  sleepy_animation(); // handle sleepy animation
+  sleepy_animation(); // handle sleepy animation (or cheerful play while waiting)
+  pet_poll(); // a tap on the cat
   eye_blink_animation(); // handle eye blinking animation
 
-  if (Serial.available()) {
+  // up to 256 bytes per pass (was 1): picture uploads move 64 KB, one byte per loop pass made that crawl
+  for (int n = 0; n < 256 && Serial.available(); n++) {
     b = Serial.read();
     serial_parse(b);
   }
@@ -879,6 +920,7 @@ void loop() {
   if (app_connected != last_connected_state) {
     if (!app_connected) { // serial disconnected
       led_color(0, 1, 1); // all on to indicate  no connection
+      status_led_update(); // unless a focus sign owns the LED
       if (random_mouse_timer != NULL) {
         lv_timer_del(random_mouse_timer);
         random_mouse_timer = NULL;
@@ -894,6 +936,7 @@ void loop() {
       power_wake(true); // display on at the right brightness (wakes the panel if it was asleep)
 
       led_color(1, 0, 1); // green on to serial connected
+      status_led_update();
       show_source();
       // beepbeep();
       playAudio("connect.wav");

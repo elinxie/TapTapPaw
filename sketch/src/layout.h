@@ -20,3 +20,7 @@ void layout_feed_system(uint8_t cpu, uint8_t mem, uint8_t batt, bool charging);
 void layout_feed_taps(uint32_t count);
 void layout_feed_mood(uint8_t mood);
 void layout_on_wallpaper(uint8_t idx); // weather (or the wallpaper key action) picked wallpaper idx
+void layout_sync_cat();
+void layout_feed_date(uint16_t year, uint8_t mon, uint8_t day, uint8_t wday); // packet 0x12
+int8_t layout_focus_led(); // -1 no focus sign, 1 busy (red LED), 0 available (green LED)
+ // typing cat widgets copy the original cat's paw/eyes/sleep state now (paw_tap calls it)

@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 - Fixed: `npm install` in app/ failed because `postinstall` called an undeclared `electron-rebuild`
 - Added: DEVELOPMENT.md and scripts/setup-dev.sh
 - Added: widget layouts: the board can show pages of widgets from a small JSON layout sent over USB, with safe mode (see docs/WIDGETS.md). Serial packets 0x0B-0x11 (upload), board ack 0x10.
+- Added: widget builder on the web page (templates, drag and resize, undo, export/import, dry run).
+- Added: Phase 3 widgets: typing cat, pomodoro, countdown, stopwatch, date, focus sign (LED), reminders, buttons with 20 actions, Spotify controls and album art, pictures (8 slots, backgrounds too), 18 ASCII pets from claude-desktop-buddy (MIT). Packets 0x12 (date) and 0x13 (board event).
+- Added: tap the cat (or a pet) to pet it; "Waiting cat" setting: cheerful (default) or sleepy (original).
+- Added: `esp32dev_ble` build: the board is also a Bluetooth keyboard for button shortcuts and media keys.
+- Changed: layout uploads are 3.3x faster (free-space reading cached during uploads).
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 

@@ -73,7 +73,8 @@ def main():
         if check: img.save(os.path.join(check, name + ".png"))
     for key, fname in [("cat", "main"), ("eyes", "closeeye"), ("sleepy", "sleepy"), ("clock", "a_clock"), ("hh", "shorthand"),
                        ("mh", "longhand"), ("sh", "secondhand"), ("i0", "sun"), ("i1", "cloud"), ("i2", "rain"), ("i3", "storm"),
-                       ("i4", "snow"), ("i5", "moon")]:
+                       ("i4", "snow"), ("i5", "moon"),
+                       ("pawL", "leftmousepaw"), ("pawD", "rightpawdown"), ("pawU", "rightpawup")]:
         path = os.path.join(SRC, "ui", "ui_img_%s_png.c" % fname)
         img = true_color_alpha(c_bytes(path, "ui_img_%s_png_data" % fname), header(path, "w"), header(path, "h"))
         out[key] = uri(img, "PNG")

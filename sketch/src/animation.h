@@ -21,6 +21,12 @@ void sleepy_animation();
 // cat mood, triggered by physical keys or the PC app (serial packet 0x06)
 enum Mood : uint8_t { MOOD_NORMAL = 0, MOOD_HAPPY = 1, MOOD_SLEEPY = 2 };
 void set_mood(uint8_t mood);
+enum IdleStyle : uint8_t { IDLE_STYLE_SLEEPY = 0, IDLE_STYLE_CHEERFUL = 1 };
+extern uint8_t idle_style; // what the cat does while nothing happens (Settings > More)
+void idle_style_save();
+void pet_init(); // after ui_init(): tap the cat to pet it
+void pet_request(); // also used by the cat widgets (layout.cpp)
+void pet_poll(); // loop()
 void eye_blink_animation();
 void random_mouse_task(lv_timer_t *timer);
 // analog clock animation

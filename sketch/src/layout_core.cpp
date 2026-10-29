@@ -184,7 +184,7 @@ Err int_in(P &p, int32_t lo, int32_t hi, int32_t &v) {
 }
 
 WType wtype_from(const char *s, size_t l) {
-  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl"};
+  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl", "ct", "pm", "cd", "sw", "dt", "fs", "bt", "sp", "aa", "rm", "pc", "pt"};
   for (uint8_t i = 1; i < W_COUNT; i++)
     if (key_is(s, l, names[i])) return (WType)i;
   return W_NONE;
@@ -196,7 +196,7 @@ Err parse_widget(P &p, Layout &L) {
   Widget w;
   memset(&w, 0, sizeof w);
   w.opa = 255;
-  bool hx = false, hy = false, hw = false, hh = false;
+  bool hx = false, hy = false, hw = false, hh = false, hp = false, he = false, hi = false;
   char text[MAX_TEXT_LEN + 1];
   size_t tl = 0;
   bool has_text = false;
@@ -227,6 +227,12 @@ Err parse_widget(P &p, Layout &L) {
       else if (key_is(key, kl, "f")) { e = int_in(p, 0, 1, v); w.f24 = v != 0; }
       else if (key_is(key, kl, "q")) { e = int_in(p, 0, 1, v); w.secs = v != 0; }
       else if (key_is(key, kl, "c")) { e = read_color(p, w.c); w.has_c = true; }
+      else if (key_is(key, kl, "p")) { e = int_in(p, 0, 1439, v); w.p = (uint16_t)v; hp = true; }
+      else if (key_is(key, kl, "b")) { e = int_in(p, 1, 60, v); w.b = (uint8_t)v; }
+      else if (key_is(key, kl, "e")) { e = int_in(p, 0, 63, v); w.e = (uint8_t)v; he = true; }
+      else if (key_is(key, kl, "g")) { e = int_in(p, 0, 65535, v); w.g = (uint16_t)v; }
+      else if (key_is(key, kl, "i")) { e = int_in(p, 0, PICTURE_SLOTS - 1, v); w.i = (uint8_t)v; hi = true; }
+      else if (key_is(key, kl, "n")) { e = int_in(p, 0, 31, v); w.n = (uint8_t)v; }
       else if (key_is(key, kl, "s")) {
         e = read_str(p, text, sizeof text, tl);
         if (!e && tl > MAX_TEXT_LEN) e = E_TEXT;
@@ -241,9 +247,31 @@ Err parse_widget(P &p, Layout &L) {
   if (w.type == W_NONE) return E_WIDGET_TYPE;
   if (!(hx && hy && hw && hh)) return E_GEOMETRY;
   if (w.x < 0 || w.y < 0 || w.w < 1 || w.h < 1 || w.x + w.w > SCREEN_W || w.y + w.h > SCREEN_H) return E_GEOMETRY;
-  if ((w.type == W_SLIDER && w.k > 1) || (w.type == W_SHAPE && w.k > 1)) return E_RANGE; // wx uses k 0..2
-  if (w.type == W_LABEL) {
-    if (!has_text || tl == 0) return E_TEXT;
+  if ((w.type == W_SLIDER && w.k > 1) || (w.type == W_SHAPE && w.k > 1)) return E_RANGE; // wx, dt, rm use k 0..2
+  switch (w.type) { // per-type rules for the feature level 2 widgets
+    case W_TCAT: if (w.w != 240 || w.h != 132) return E_GEOMETRY; break; // drawn at its fixed size
+    case W_ALBUM: if (w.w != 96 || w.h != 96) return E_GEOMETRY; break;
+    case W_PET: if (w.w != 160 || w.h != 132) return E_GEOMETRY; break;
+    case W_POMO:
+      if (!hp) w.p = 25;
+      if (!w.b) w.b = 5;
+      if (w.p < 1 || w.p > 180) return E_RANGE;
+      break;
+    case W_COUNTDOWN: if (!hp) return E_RANGE; break;
+    case W_REMIND:
+      if (!hp) w.p = 30;
+      if (w.p < 5 || w.p > 240) return E_RANGE;
+      break;
+    case W_BUTTON:
+      if (!he || w.e >= BA_COUNT) return E_RANGE;
+      if (!has_text || tl == 0) return E_TEXT;
+      break;
+    case W_PICTURE: if (!hi) return E_RANGE; break;
+    default: break;
+  }
+  bool keeps_text = (w.type == W_LABEL || w.type == W_BUTTON || w.type == W_FOCUS || w.type == W_COUNTDOWN);
+  if (w.type == W_LABEL && (!has_text || tl == 0)) return E_TEXT;
+  if (keeps_text && has_text && tl > 0) {
     if (L.text_used + tl + 1 > MAX_TEXT_POOL) return E_TEXT_POOL;
     memcpy(L.text + L.text_used, text, tl);
     L.text[L.text_used + tl] = '\0';
@@ -272,9 +300,9 @@ Err parse_bg(P &p, Page &pg) {
         size_t l;
         e = read_str(p, tb, sizeof tb, l);
         if (e) return e;
-        if (l != 1 || (tb[0] != 'w' && tb[0] != 'b' && tb[0] != 's' && tb[0] != 'g')) return E_PAGE;
+        if (l != 1 || (tb[0] != 'w' && tb[0] != 'b' && tb[0] != 's' && tb[0] != 'g' && tb[0] != 'i')) return E_PAGE;
         t = tb[0];
-      } else if (key_is(key, kl, "i")) { e = int_in(p, 0, 5, v); idx = v; }
+      } else if (key_is(key, kl, "i")) { e = int_in(p, 0, PICTURE_SLOTS - 1, v); idx = v; }
       else if (key_is(key, kl, "c")) { e = read_color(p, pg.c1); hc = true; }
       else if (key_is(key, kl, "d")) { e = read_color(p, pg.c2); hd = true; }
       else e = skip(p, 4);
@@ -287,7 +315,7 @@ Err parse_bg(P &p, Page &pg) {
   switch (t) {
     case 'w': pg.bg_type = BG_WEATHER; break;
     case 'b':
-      if (idx < 0) return E_RANGE;
+      if (idx < 0 || idx > 5) return E_RANGE;
       pg.bg_type = BG_BUILTIN;
       pg.bg_idx = (uint8_t)idx;
       break;
@@ -298,6 +326,11 @@ Err parse_bg(P &p, Page &pg) {
     case 'g':
       if (!hc || !hd) return E_COLOR;
       pg.bg_type = BG_GRADIENT;
+      break;
+    case 'i':
+      if (idx < 0) return E_RANGE;
+      pg.bg_type = BG_IMAGE;
+      pg.bg_idx = (uint8_t)idx;
       break;
   }
   return E_OK;
@@ -431,16 +464,21 @@ size_t ack_encode(const Ack &a, uint8_t *o) {
   return ACK_FRAME_BYTES;
 }
 
-Ack Session::make(uint8_t cmd, uint8_t status, uint8_t detail) {
+Ack Session::make(uint8_t cmd, uint8_t status, uint8_t detail, bool own_crc, uint32_t crc) {
   Ack a;
   a.cmd = cmd;
   a.status = status;
   a.detail = detail;
   a.flags = (uint8_t)(st.state_flags() | (is_open ? FL_SESSION_OPEN : 0));
   a.seq = next_seq;
-  size_t kb = st.free_bytes() / 1024;
+  // free space costs a walk over the whole LittleFS partition (~0.1 s): chunk acks reuse the value from the last other ack
+  if (cmd != PKT_CHUNK || !free_known) {
+    free_cache = st.free_bytes();
+    free_known = true;
+  }
+  size_t kb = free_cache / 1024;
   a.free_kb = (uint16_t)(kb > 65535 ? 65535 : kb);
-  a.crc = st.stored_crc();
+  a.crc = own_crc ? crc : st.stored_crc();
   return a;
 }
 
@@ -458,8 +496,17 @@ Ack Session::handle(uint8_t id, const uint8_t *p, uint8_t n) {
     case PKT_CHUNK: return do_chunk(p, n);
     case PKT_END: return n == 0 ? do_end() : make(id, ST_BAD_PKT);
     case PKT_ABORT: return n == 0 ? do_abort() : make(id, ST_BAD_PKT);
-    case PKT_QUERY: return make(id, ST_OK);
+    case PKT_QUERY: // detail = feature level; with a slot byte the crc is that picture's
+      if (n == 1 && p[0] < PICTURE_SLOTS) return make(id, ST_OK, FEATURE_LEVEL, true, st.picture_crc(p[0]));
+      return n == 0 ? make(id, ST_OK, FEATURE_LEVEL) : make(id, ST_BAD_PKT);
     case PKT_RESET:
+      if (n == 1 && p[0] < PICTURE_SLOTS) { // delete one picture
+        if (is_open && kind == KIND_PICTURE && slot == p[0]) drop();
+        if (!st.picture_remove(p[0])) return make(id, ST_IO);
+        st.set_picture_crc(p[0], 0);
+        pics_changed = true;
+        return make(id, ST_OK, 0, true, 0);
+      }
       if (n != 0) return make(id, ST_BAD_PKT);
       drop();
       if (!st.final_remove()) return make(id, ST_IO);
@@ -474,14 +521,17 @@ Ack Session::do_begin(const uint8_t *p, uint8_t n) {
   if (n != 11) return make(PKT_BEGIN, ST_BAD_PKT);
   uint8_t k = p[0], sl = p[1], v = p[2];
   uint32_t tot = le32(p + 3), crc = le32(p + 7);
-  if (k != 0) return make(PKT_BEGIN, k == 1 ? ST_UNSUPPORTED : ST_BAD_PKT);
+  if (k > KIND_ART) return make(PKT_BEGIN, ST_BAD_PKT);
+  if (k == KIND_PICTURE && sl >= PICTURE_SLOTS) return make(PKT_BEGIN, ST_BAD_PKT);
   if (v != SCHEMA_VERSION) return make(PKT_BEGIN, ST_INVALID, E_VERSION);
   if (tot == 0) return make(PKT_BEGIN, ST_BAD_PKT);
-  if (tot > MAX_LAYOUT_BYTES) return make(PKT_BEGIN, ST_TOO_BIG, E_TOO_BIG);
+  uint32_t cap = k == KIND_LAYOUT ? MAX_LAYOUT_BYTES : k == KIND_PICTURE ? MAX_PICTURE_BYTES : MAX_ART_BYTES;
+  if (tot > cap) return make(PKT_BEGIN, ST_TOO_BIG, k == KIND_LAYOUT ? E_TOO_BIG : 0);
   if (is_open && kind == k && slot == sl && ver == v && total == tot && want_crc == crc) return make(PKT_BEGIN, ST_OK); // resume: ack carries next_seq
   drop();
-  if (st.free_bytes() < (size_t)tot + 1024) return make(PKT_BEGIN, ST_NO_SPACE);
-  if (!st.tmp_open()) return make(PKT_BEGIN, ST_IO);
+  // album art lives in RAM. A replaced picture keeps its old file until the new one is complete, so both must fit.
+  if (k != KIND_ART && st.free_bytes() < (size_t)tot + 8192) return make(PKT_BEGIN, ST_NO_SPACE); // keep 8 KB for LittleFS itself
+  if (!st.tmp_open(k, sl)) return make(PKT_BEGIN, ST_IO);
   is_open = true;
   kind = k;
   slot = sl;
@@ -529,6 +579,7 @@ Ack Session::do_end() {
     drop();
     return make(PKT_END, ST_CRC);
   }
+  if (kind != KIND_LAYOUT) return end_picture();
   uint8_t *buf = new (std::nothrow) uint8_t[total + 1];
   if (!buf) {
     drop();
@@ -559,7 +610,7 @@ Ack Session::do_end() {
     drop();
     return make(PKT_END, ST_INVALID, (uint8_t)e);
   }
-  if (!st.tmp_commit()) {
+  if (!st.tmp_commit(KIND_LAYOUT, 0)) {
     drop();
     return make(PKT_END, ST_IO);
   }
@@ -569,6 +620,53 @@ Ack Session::do_end() {
   next_seq = 0;
   changed = true;
   return make(PKT_END, ST_OK);
+}
+
+// Pictures are too big to read back into RAM: stream them back for the crc and check the format's markers.
+Ack Session::end_picture() {
+  uint8_t head[22] = {0}, tail[2] = {0};
+  uint32_t crc = 0;
+  size_t n = 0;
+  if (!st.tmp_scan(crc, n, head, sizeof head, tail) || n != total) {
+    drop();
+    return make(PKT_END, ST_IO);
+  }
+  if (crc != want_crc) {
+    drop();
+    return make(PKT_END, ST_CRC);
+  }
+  bool ok;
+  if (kind == KIND_PICTURE) { // LVGL SJPG: "_SJPG__\0V1.00\0", width u16, height u16, splits u16, split height u16
+    uint16_t w = (uint16_t)(head[14] | (head[15] << 8)), h = (uint16_t)(head[16] | (head[17] << 8)), parts = (uint16_t)(head[18] | (head[19] << 8));
+    ok = n > 22 && memcmp(head, "_SJPG__", 7) == 0 && w >= 1 && w <= SCREEN_W && h >= 1 && h <= SCREEN_H && parts >= 1;
+  } else { // plain baseline JPEG
+    ok = n > 4 && head[0] == 0xFF && head[1] == 0xD8 && tail[0] == 0xFF && tail[1] == 0xD9;
+  }
+  if (!ok) {
+    drop();
+    return make(PKT_END, ST_INVALID);
+  }
+  if (!st.tmp_commit(kind, slot)) {
+    drop();
+    return make(PKT_END, ST_IO);
+  }
+  if (!st.picture_check(kind, slot)) { // stored, but the board cannot decode it: remove it again
+    if (kind == KIND_PICTURE) {
+      st.picture_remove(slot);
+      st.set_picture_crc(slot, 0);
+    }
+    is_open = false;
+    received = 0;
+    next_seq = 0;
+    pics_changed = true;
+    return make(PKT_END, ST_INVALID, 1);
+  }
+  if (kind == KIND_PICTURE) st.set_picture_crc(slot, want_crc);
+  is_open = false;
+  received = 0;
+  next_seq = 0;
+  pics_changed = true;
+  return make(PKT_END, ST_OK, 0, true, want_crc);
 }
 
 Ack Session::do_abort() {

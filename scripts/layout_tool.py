@@ -62,7 +62,7 @@ class Board:
         if not port:
             sys.exit("no /dev/cu.usbserial-* port found; pass --port")
         self.port = port
-        self.ser = serial.Serial(port, 115200, timeout=0.05)  # opening usually resets the ESP32
+        self.ser = serial.Serial(port, 115200, timeout=0.005)  # opening usually resets the ESP32
         time.sleep(boot_wait)
         self.ser.reset_input_buffer()
         self.buf = b""
@@ -127,6 +127,60 @@ class Board:
     def abort(self):
         return self.call(pkt(0x0E), 0x0E)
 
+    def send_chunks(self, data, seq, window=1):
+        """Sliding window: up to `window` chunks in flight. Keep window=1 for the real board: measured, more than one chunk
+        in flight loses bytes while the board writes flash (the end checksum catches it). The board acks every
+        chunk with the next sequence it expects; a gap answers "bad sequence" and the sender rewinds to it. Returns the last ack."""
+        n = (len(data) + CHUNK - 1) // CHUNK
+        acked, sent, a, stalls = seq, seq, None, 0
+        while acked < n:
+            while sent < n and sent - acked < window:
+                self.send(chunk_pkt(data, sent))
+                sent += 1
+            a = self.ack(0x0C, 2.0)
+            if a is None:  # lost: resend from the last acknowledged chunk
+                stalls += 1
+                if stalls > 3:
+                    return None
+                self.buf = b""
+                sent = acked
+                continue
+            if a.status == ST["bad sequence"]:
+                if a.seq < acked or a.seq > sent:
+                    continue  # stale answer to a chunk already handled
+                acked = sent = a.seq  # rewind to what the board wants
+                self.drain(0.05)
+                continue
+            if a.status != 0:
+                return a
+            acked = max(acked, a.seq)
+            stalls = 0
+        return a
+
+    def drain(self, seconds):
+        """Read and drop acks still on the way (after a rewind)."""
+        end = time.time() + seconds
+        while time.time() < end:
+            self.ser.read(256)
+        self.buf = b""
+
+    def upload_kind(self, data, kind, slot, window=1):
+        """Picture (kind 1, slot 0..7) or album art (kind 2). The END ack carries the crc the board read back."""
+        a = self.call(begin_pkt(data, kind=kind, slot=slot), 0x0B)
+        if not a or a.status != 0:
+            return False, a
+        a = self.send_chunks(data, a.seq, window)
+        if not a or a.status not in (0, ST["bad sequence"]):
+            return False, a
+        a = self.call(pkt(0x0D), 0x0D, timeout=5.0)  # the board test-decodes the picture before it answers
+        return bool(a and a.status == 0 and a.crc == zlib.crc32(data)), a
+
+    def picture_crc(self, slot):
+        return self.call(pkt(0x0F, bytes([slot])), 0x0F)
+
+    def remove_picture(self, slot):
+        return self.call(pkt(0x11, bytes([slot])), 0x11)
+
     def upload(self, data, log=print):
         n = (len(data) + CHUNK - 1) // CHUNK
         a = self.call(begin_pkt(data), 0x0B)
@@ -154,7 +208,8 @@ class Board:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["info", "upload", "reset"])
+    ap.add_argument("cmd", choices=["info", "upload", "reset", "picture"])
+    ap.add_argument("--slot", type=int, default=0, help="picture slot 0..7 (picture command)")
     ap.add_argument("file", nargs="?")
     ap.add_argument("--port")
     args = ap.parse_args()
@@ -164,6 +219,10 @@ def main():
             print(b.query())
         elif args.cmd == "reset":
             print(b.reset_layout())
+        elif args.cmd == "picture":
+            ok, a = b.upload_kind(open(args.file, "rb").read(), 1, args.slot)
+            print(("OK: " if ok else "FAILED: ") + repr(a))
+            sys.exit(0 if ok else 1)
         else:
             data = open(args.file, "rb").read().strip()
             ok, msg = b.upload(data)

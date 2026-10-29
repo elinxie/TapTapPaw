@@ -4,8 +4,9 @@ The board can show a **layout** instead of its built-in main screen: several pag
 240x320 (portrait) canvas, each page with its own background. Nothing is compiled: the web page builds a small JSON file and sends it to the
 board over USB; the firmware reads it and builds the screens.
 
-Status: **Phase 1 (layout engine + upload protocol)** and **Phase 2 (the builder on the web page)** are done. Custom image backgrounds
-(Phase 3) are not.
+Status: **Phase 1** (layout engine + upload protocol), **Phase 2** (the builder on the web page) and **Phase 3** (typing cat, timers,
+buttons, Bluetooth keys, Spotify controls, pictures, album art, pets; see "Phase 3 widgets" below) are done. Planned next: a GIF
+widget and a one-tap timer button.
 
 ## Using the builder (web page)
 
@@ -38,11 +39,11 @@ put arbitrary HTML, CSS, images or fonts on it.
 
 | You can | You cannot (yet) |
 |---------|------------------|
-| Place the widget types below, anywhere on the 240x320 portrait screen, up to 12 per page, 6 pages, 40 in total | Add new widget types, custom fonts or custom icons without new firmware |
+| Place the widget types below, anywhere on the 240x320 portrait screen, up to 12 per page, 6 pages, 40 in total | Add new widget types or custom fonts without new firmware |
 | Pick colors, text size (small/large), alignment, opacity, corner radius for the widgets that have them | Resize the analog clock or the mood cat (they have a fixed size) |
-| Choose a page background: weather-driven (default), one of the 6 built-in wallpapers, solid color, vertical gradient | Custom image backgrounds (Phase 3) |
+| Choose a page background: weather-driven (default), one of the 6 built-in wallpapers, solid color, vertical gradient | Animated GIFs (planned) |
 | Keep the original main screen as one of the pages (`{"m":1}`) | Edit the original main screen's parts individually |
-| Swipe left/right between pages, optional auto-rotate | Per-widget tap actions (stretch goal) |
+| Swipe left/right between pages, optional auto-rotate | Run programs on the computer (a page cannot; Bluetooth keys can send shortcuts) |
 
 With **no layout stored the board behaves exactly as before**: the same screens, the same swipe-down Settings, the same packets.
 
@@ -71,6 +72,7 @@ Compact JSON, at most **4096 bytes** (the example is 647 bytes). Integers only. 
 | `{"t":"b","i":0..5}` | built-in wallpaper: 0 sunny, 1 cloudy, 2 rainy, 3 stormy, 4 snowy, 5 night |
 | `{"t":"s","c":"#rrggbb"}` | solid color (`#rgb` also accepted) |
 | `{"t":"g","c":"#top","d":"#bottom"}` | vertical gradient |
+| `{"t":"i","i":0..7}` | your picture in slot 0..7 (Phase 3), sent by the page; a missing slot shows the weather wallpaper |
 
 **Widget**: `{"t":TYPE,"x":,"y":,"w":,"h":, ...options}`. `x y w h` are required for every widget (even the fixed-size ones) and the
 widget must lie fully inside the screen: 240 wide x 320 tall, portrait like the original screens (panel 240x320, rotation 0, or 180 degrees with the rotate setting).
@@ -93,6 +95,61 @@ text in total, nesting depth 8. Anything else is rejected whole; the old layout 
 
 Data comes from what is already sent to the board: time and system bars from the status packet `0x01`, music `0x02`, weather `0x03`
 (or WiFi mode), taps from the physical keys. With no feed a widget shows its placeholder.
+
+## Phase 3 widgets (firmware feature level 2)
+
+The page asks the board (QUERY, `detail` = feature level) before sending; an older firmware gets a clear message instead of a refusal.
+
+| `t` | Widget | Options | Notes |
+|-----|--------|---------|-------|
+| `ct` | typing cat | | fixed 240x132: the main screen's cat; taps along with the keys, button widgets, the desktop app and Bluetooth keys |
+| `pm` | pomodoro | `p` work minutes 1..180 (25), `b` break 1..60 (5), `c` | tap start/pause, hold reset; beep + cat when work ends |
+| `cd` | countdown | `p` time of day in minutes 0..1439 (required), `s` caption, `z`, `c` | counts to that time, then to the same time tomorrow |
+| `sw` | stopwatch | `z`, `c` | tap start/stop, hold reset |
+| `dt` | date | `k` format 0 `Thu 29 Oct`, 1 `2026-10-29`, 2 `October 29`; `z`, `a`, `c` | date from packet `0x12` (the web page sends it every minute) |
+| `fs` | focus sign | `s` busy text (`Focus`) | tap busy/available; the board LED follows (red / green) while it is in the layout |
+| `bt` | button | `e` action (required), `s` label (required), `g` argument, `z`, `c`, `r` | actions below |
+| `sp` | Spotify controls | `c` | previous / play-pause / next, done by the web page (Spotify Premium) |
+| `aa` | album art | | fixed 96x96; the cover the web page sends (JPEG, RAM only) |
+| `rm` | reminder | `k` 0 water, 1 stretch, 2 breathe; `p` every 5..240 min (30), `z` | beep, cat smiles, note; tap = done |
+| `pc` | picture | `i` slot 0..7 (required) | any size; the page crops and encodes your image to the box |
+| `pt` | pet | `n` species 0..17 (4 = cat) | fixed 160x132; tap to pet it. See "Pets" |
+
+**Button actions** (`e`): 0 none, 1 cat taps, 2 cat happy, 3 cat sleepy, 4 toggle C/F, 5 mute, 6 brightness step, 7 next wallpaper,
+8 next page, 9 previous page, 10 pomodoro start/pause, 11 pomodoro reset, 12 focus sign, 13 stopwatch start/stop, 14 stopwatch reset,
+15-17 Spotify play-pause / next / previous (web page), 18 event to the page (`g` = number, packet `0x13`), 19 Bluetooth key
+(`g` = modifiers << 8 | HID usage; modifiers 1 Ctrl, 2 Shift, 4 Alt, 8 Cmd/Win), 20 Bluetooth media key (`g` 0 play/pause,
+1 next, 2 previous, 3 volume up, 4 volume down, 5 mute). Bluetooth actions need the Bluetooth build (below); otherwise they show a note.
+
+### Pictures
+
+The page turns your image into a *split JPEG* (16-row baseline JPEG strips, LVGL's SJPG format) at the exact widget or screen size,
+strips the color profile Chrome adds, and uploads it as kind 1 to one of 8 slots (`/img/<slot>.sjpg`, at most 64 KB each). The board
+test-decodes the picture before it accepts it, so a broken file is refused and the old one stays. A full-screen 240x320 picture is
+about 25-35 KB and takes about 8 s to send. Pictures stay on the board until replaced or deleted (RESET with a slot).
+
+### Pets
+
+18 animated ASCII characters drawn in code (capybara, duck, goose, blob, cat, dragon, octopus, owl, penguin, turtle, snail, ghost,
+axolotl, cactus, robot, rabbit, mushroom, chonk), from Anthropic's
+[claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy) (MIT, see `sketch/src/pets/UPSTREAM.txt`). No image files:
+each pose is a few lines of text. A pet idles with small happy motions, sleeps when the board does, gets busy while you type, celebrates
+when a pomodoro ends, waves at reminders, and shows hearts when you tap it. Each pet on screen takes about 41 KB of heap (one per page
+is the comfortable limit; a second one that does not fit is left out).
+
+The standard build carries 6 species (capybara, duck, cat, penguin, axolotl, rabbit) to stay inside its 1.44 MB slot; others show the
+cat. The WiFi and Bluetooth builds carry all 18 (ack flag 64). The page marks which species need those builds.
+
+**Waiting cat**: Settings > More > "Waiting cat" picks *Cheerful* (default: waves, smiles, chases the mouse paw between 1 and 30 minutes
+idle) or *Sleepy (original)*. Tapping the cat on any screen pets it (happy face, heart, purr).
+
+### Bluetooth keyboard build
+
+`pio run -d sketch -e esp32dev_ble` builds firmware that is also a Bluetooth keyboard ("TapTapPaw"): button actions 19 and 20 send
+shortcuts and media keys to the paired computer, and the cat taps along. It uses the same partition table as the WiFi build
+(`littlefs_noota.csv`: one 2.75 MB app slot, no OTA). The LittleFS partition (sounds, layout, pictures) and NVS keep the same offsets as
+in the standard build, so they survive, but going from the standard build to this one does change the partition table: Export your
+layout first. Pair it from the computer's Bluetooth settings.
 
 ## Gestures
 
@@ -135,23 +192,29 @@ packets `0x01`-`0x0A` are unchanged. Stop-and-wait: send one packet, wait for it
 
 | id | name | payload |
 |----|------|---------|
-| `0x0B` | BEGIN | `kind` (0 layout, 1 image = Phase 3, refused today), `slot`, `schema version`, `total u32 LE`, `crc32 u32 LE` (11 bytes) |
+| `0x0B` | BEGIN | `kind` (0 layout, 1 picture, 2 album art), `slot` (picture 0..7), `schema version`, `total u32 LE`, `crc32 u32 LE` (11 bytes) |
 | `0x0C` | CHUNK | `seq u16 LE`, 1..192 data bytes. Chunk n holds bytes n*192 .. n*192+191; every chunk but the last is exactly 192 bytes |
 | `0x0D` | END | empty: verify, validate, commit |
 | `0x0E` | ABORT | empty: drop the upload in progress |
-| `0x0F` | QUERY | empty: report state, no side effects |
-| `0x11` | RESET | empty: delete the stored layout, back to the built-in screens |
+| `0x0F` | QUERY | empty: report state, no side effects (`detail` = feature level, 2 since Phase 3); `[slot]`: `crc32` of that picture |
+| `0x11` | RESET | empty: delete the stored layout, back to the built-in screens; `[slot]`: delete that picture |
+| `0x12` | DATE (host to board) | `year-2000`, `month`, `day`, `weekday 0..6` |
+| `0x13` | EVENT (board to host) | `action`, `arg u16 LE`: a button the page acts on (Spotify, event); sent only while the page is the data source |
 | `0x10` | ACK (board to host) | `cmd`, `status`, `detail`, `flags`, `seq u16`, `free_kb u16`, `crc32 u32` (12 bytes) |
 
 `status`: 0 ok, 1 bad packet, 2 bad sequence (`seq` = the chunk the board wants), 3 too big, 4 checksum mismatch, 5 unsupported,
 6 no space, 7 flash write error, 8 invalid layout (`detail` = reason, see `Err` in `layout_core.h`), 9 no upload in progress,
-10 incomplete. `flags`: 1 layout active, 2 safe mode, 4 upload in progress, 8 layout stored. `seq` is the next chunk expected, `crc32`
+10 incomplete. `flags`: 1 layout active, 2 safe mode, 4 upload in progress, 8 layout stored, 16 Bluetooth build, 32 Bluetooth
+paired, 64 all 18 pets. `seq` is the next chunk expected, `crc32`
 the stored layout's checksum (0 = none), `free_kb` the free space of the LittleFS partition.
 
 - **Retry**: resend the same packet if no ack arrives. A repeated CHUNK for the one just stored is acked without writing it again.
 - **Resume**: BEGIN with the same kind/slot/size/crc as the upload in progress answers `seq` = the next missing chunk. A reset or power
   loss drops the partial upload (the stored layout is untouched); start again from chunk 0.
 - **Verify**: after END, send QUERY: `crc32` must equal the checksum of what you sent.
+- Pictures (kind 1) are at most 65,536 bytes, album art (kind 2, kept in RAM, not flash) at most 12,288 bytes.
+- Speed: about 3.9 KB/s (a 4 KB layout in about 1 s). Sending several chunks before waiting for acks was tried and lost bytes while the
+  board writes to flash, so uploads stay stop-and-wait.
 - A BEGIN larger than 4096 bytes, an unknown version or kind, or too little free space is refused before anything is written.
 
 The page code is in `web-sync/index.html` (`validateLayout`, `layoutBeginPacket`, ..., `uploadLayoutBytes`); the firmware side is
@@ -168,7 +231,7 @@ node web-sync/test-packets.mjs       # existing packets, unchanged
 ~/.venvs/pio39/bin/python scripts/layout_tool.py info | reset
 ```
 
-`sketch/test/host/layout-cases.tsv` is a table of 76 layouts with the expected verdict; the firmware parser and the page validator must
+`sketch/test/host/layout-cases.tsv` is a table of 116 layouts with the expected verdict; the firmware parser and the page validator must
 both agree with every row.
 
 ## Measured size (build flags `-DINVERT_COLORS_DEFAULT=1`)
@@ -179,3 +242,14 @@ both agree with every row.
 | `esp32dev` RAM (static) | 57,552 B (17.6 %) | 59,752 B (18.2 %) | +2,200 B |
 | `esp32dev_wifi` flash (2,883,584 B partition) | 1,950,537 B (67.6 %) | 1,966,785 B (68.2 %) | +16,248 B |
 | `esp32dev_wifi` RAM (static) | 83,020 B (25.3 %) | 85,204 B (26.0 %) | +2,184 B |
+
+Phase 3 (`feature/widgets-extras`, measured 2026-10-29):
+
+| | Phase 2 | Phase 3 | Change |
+|--|--|--|--|
+| `esp32dev` flash (1,441,792 B) | 1,294,433 B (89.8 %) | 1,338,081 B (92.8 %) | +43.6 KB (6 pets), ~101 KB left |
+| `esp32dev` RAM (static) | 59,752 B | 61,336 B | +1.6 KB |
+| `esp32dev_wifi` flash (2,883,584 B) | 1,966,785 B (68.2 %) | 2,054,453 B (71.2 %) | +87.7 KB (18 pets) |
+| `esp32dev_wifi` RAM (static) | 85,204 B | 87,092 B | +1.9 KB |
+| `esp32dev_ble` flash (2,883,584 B) | | 1,713,653 B (59.4 %) | new build (Bluetooth keyboard, 18 pets) |
+| `esp32dev_ble` RAM (static) | | 75,936 B | |

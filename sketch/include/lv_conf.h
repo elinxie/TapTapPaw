@@ -42,7 +42,7 @@
 #define LV_COLOR_MIX_ROUND_OFS (LV_COLOR_DEPTH == 32 ? 0: 128)
 
 /*Images pixels with this color will not be drawn if they are chroma keyed)*/
-#define LV_COLOR_CHROMA_KEY lv_color_hex(0x00ff00)         /*pure green*/
+#define LV_COLOR_CHROMA_KEY lv_color_hex(0xff00ff)         /*magenta: the ASCII pets (src/pets) draw in pure green, never magenta*/
 
 /*=========================
    MEMORY SETTINGS

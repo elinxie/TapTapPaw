@@ -1,6 +1,7 @@
 #include "animation.h"
 #include "accessory.h"
 #include "layout.h"
+void cat_heart(); // layout.cpp
 #include "ui/ui.h"
 //=========================== custom animation task ===========================
 
@@ -35,16 +36,104 @@ lv_timer_t *random_mouse_timer = NULL;
 
 //------------------------------------------
 
+// ---- waiting style: SLEEPY = the original (falls asleep after a minute), CHEERFUL = plays while it waits (waves,
+// smiles with a heart, bats the mouse) and only falls asleep after 30 minutes. Settings > More > "Waiting cat".
+uint8_t idle_style = IDLE_STYLE_CHEERFUL;
+static bool sleepy_forced = false; // the sleepy mood (key or app) still means "sleep now"
+#define CHEER_SLEEP_MS (30UL * 60000UL)
+static uint8_t play_kind = 0, play_step = 0;
+static uint32_t play_next = 0, play_at = 0;
+static void paw_show(bool up) {
+  if (up) {
+    lv_obj_clear_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_clear_flag(ui_main_Image_rightpawdown, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(ui_main_Image_rightpawup, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+static void play_stop() {
+  if (play_kind) paw_show(false);
+  play_kind = 0;
+}
+static void play_done(uint32_t now) {
+  play_kind = 0;
+  play_next = now + 3500 + esp_random() % 6000;
+}
+void mouse_wiggle(); // below
+static void play_tick(uint32_t now) {
+  if (!play_kind) {
+    if ((int32_t)(now - play_next) < 0) return;
+    play_kind = 1 + esp_random() % 3;
+    play_step = 0;
+    play_at = now;
+  }
+  if ((int32_t)(now - play_at) < 0) return;
+  switch (play_kind) {
+    case 1: // wave the right paw: up/down three times
+      paw_show(play_step % 2 == 0);
+      play_at = now + 160;
+      if (++play_step >= 6) {
+        paw_show(false);
+        play_done(now);
+      }
+      break;
+    case 2: // smile, with a heart
+      {
+        unsigned long keep = last_sleep_check; // set_mood restarts the idle timer; keep it, so the 30 minute limit still counts
+        set_mood(MOOD_HAPPY);
+        last_sleep_check = keep;
+      }
+      cat_heart();
+      play_done(now);
+      break;
+    default: // bat the mouse a few times
+      mouse_wiggle();
+      play_at = now + 380;
+      if (++play_step >= 3) play_done(now);
+      break;
+  }
+}
+
+// Tapping the cat (original screen, typing cat or mood cat widget): happy eyes, a heart, a soft purr-like chirp
+static volatile bool pet_pending = false;
+void pet_request() { pet_pending = true; }
+void pet_poll() {
+  if (!pet_pending) return;
+  pet_pending = false;
+  set_mood(MOOD_HAPPY);
+  cat_heart();
+  playToneWithVolume(220, 12, 45);
+  playToneWithVolume(180, 12, 45);
+  playToneWithVolume(240, 12, 60);
+}
+static void pet_cb(lv_event_t *e) { pet_request(); }
+void pet_init() {
+  // the original screen's cat (SquareLine objects: only flags and an event are added here, the generated code is unchanged)
+  lv_obj_add_flag(ui_main_Container_cat, LV_OBJ_FLAG_CLICKABLE);
+  for (uint32_t i = 0; i < lv_obj_get_child_cnt(ui_main_Container_cat); i++) lv_obj_clear_flag(lv_obj_get_child(ui_main_Container_cat, i), LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(ui_main_Container_cat, pet_cb, LV_EVENT_SHORT_CLICKED, NULL);
+  pref.begin("config", true);
+  idle_style = pref.getUChar("idle_style", IDLE_STYLE_CHEERFUL);
+  pref.end();
+  if (idle_style > IDLE_STYLE_CHEERFUL) idle_style = IDLE_STYLE_CHEERFUL;
+}
+void idle_style_save() {
+  pref.begin("config", false);
+  pref.putUChar("idle_style", idle_style);
+  pref.end();
+}
+
 // sleepy animation (non-blocking)
 // eyes blinking animation (non-blocking)
 void sleepy_animation() {
-  unsigned long now = millis();
+  unsigned long now = millis(), idle = now - last_sleep_check;
+  if (idle < SLEEP_TIMER) sleepy_forced = false; // any activity cancels a forced sleep
+  bool cheer = idle_style == IDLE_STYLE_CHEERFUL && !sleepy_forced && idle >= SLEEP_TIMER && idle < CHEER_SLEEP_MS;
+  current_sleep_state = idle >= SLEEP_TIMER && !cheer;
+  if (cheer) play_tick(now);
+  else play_stop();
 
-  if (now - last_sleep_check >= SLEEP_TIMER) {
-    current_sleep_state = true; // toggle sleepy state every 60 seconds for demo purposes (replace with actual sleep detection logic)
-  } else {
-    current_sleep_state = false;
-  } 
 
   if (current_sleep_state != last_sleep_state) {
     if (current_sleep_state) {
@@ -71,6 +160,7 @@ void set_mood(uint8_t mood) {
     happy_start = now;
     last_sleep_check = now; // wake up if sleepy
   } else if (mood == MOOD_SLEEPY) {
+    sleepy_forced = true;
     last_sleep_check = now - SLEEP_TIMER; // unsigned wrap is fine: sleepy_animation() sees the timer as expired
   } else {
     last_sleep_check = now;
@@ -253,4 +343,10 @@ void media_track_status(char *title, char *artist) {
   layout_feed_music(title, artist);
   lv_label_set_text(ui_main_Label_title, title);
   lv_label_set_text(ui_main_Label_artist, artist);
+}
+// one bat at the mouse with the left paw (same animation the desktop app's mouse movement drives)
+void mouse_wiggle() {
+  int target = random(MIN_MOUSE_POS, MAX_MOUSE_POS);
+  mouse_animation(ui_main_Image_leftpaw, last_x_cat, target, (lv_img_dsc_t **)ui_imgset_cat_left_const, 2, 0, 1, 260, 0, 0);
+  last_x_cat = target;
 }
