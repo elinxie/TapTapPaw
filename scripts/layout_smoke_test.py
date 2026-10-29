@@ -185,6 +185,30 @@ def main():
     q = b.query()
     check("board alive after %d typing events with the cat on screen" % n_taps, q is not None and (q.flags & 1), q)
 
+    # 13 every feature level 2 widget on screen (two pages, auto-rotate 3 s) + the date packet; heap must stay flat
+    lv2 = (b'{"v":1,"rot":3,"pg":[{"bg":{"t":"g","c":"#102030","d":"#3050a0"},"w":['
+           b'{"t":"pm","x":8,"y":8,"w":110,"h":110,"p":25,"b":5},{"t":"cd","x":126,"y":8,"w":106,"h":52,"p":1020,"s":"Home"},'
+           b'{"t":"sw","x":126,"y":68,"w":106,"h":36},{"t":"dt","x":8,"y":126,"w":224,"h":22,"a":1},'
+           b'{"t":"fs","x":8,"y":156,"w":224,"h":50,"s":"On a call"},{"t":"rm","x":8,"y":214,"w":224,"h":30,"k":1,"p":45},'
+           b'{"t":"bt","x":8,"y":252,"w":72,"h":40,"e":1,"s":"Tap"},{"t":"sp","x":88,"y":252,"w":144,"h":40}]},'
+           b'{"w":[{"t":"ct","x":0,"y":100,"w":240,"h":132},{"t":"bt","x":20,"y":20,"w":200,"h":44,"e":19,"g":2052,"s":"Cmd+A"}]}]}')
+    ok, msg = full(b, lv2)
+    check("layout with every new widget type uploads (%d bytes)" % len(lv2), ok, msg)
+    b.send(bytes([0xFF, 0x12, 4, 26, 10, 29, 4]))  # date 2026-10-29, Thursday
+    b.send(bytes([0xFF, 0x12, 4, 26, 13, 40, 9]))  # invalid date: ignored
+    log = b.read_text(20.0)
+    pairs = [(int(m.group(1)), int(m.group(2))) for m in re.finditer(r"layout page (\d+)/\d+ heap free (\d+)", log)]
+    heaps = [h for _, h in pairs]
+    check("new widgets: pages cycled (%d changes)" % len(heaps), len(heaps) >= 4, pairs)
+    if len(heaps) >= 4:
+        # pages differ in size, so compare each page with itself: first visit vs last visit
+        drift = max(next(h for p_, h in pairs if p_ == pg) - next(h for p_, h in reversed(pairs) if p_ == pg) for pg in set(p_ for p_, _ in pairs))
+        check("new widgets: heap flat across page changes (worst drift %d B)" % drift, drift <= 2048, pairs)
+        check("new widgets: heap healthy (> 40 KB)", min(heaps) > 40000, min(heaps))
+    check("no crash or watchdog in the log", "Guru Meditation" not in log and "abort()" not in log and "rst:" not in log, log[-400:])
+    q = b.query()
+    check("board alive after the new widgets ran", q is not None and (q.flags & 1), q)
+
     # 10 reset
     a = b.reset_layout()
     q = b.query()

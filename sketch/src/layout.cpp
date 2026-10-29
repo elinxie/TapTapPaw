@@ -73,6 +73,8 @@ void host_send_event(uint8_t action, uint16_t arg);
 void status_led_update();
 bool ble_keys_send(uint8_t mods, uint8_t key); // false = not in this build / not paired
 bool ble_media_send(uint16_t id);
+bool ble_keys_available();
+bool ble_keys_connected();
 static void goto_page(uint8_t idx, lv_scr_load_anim_t anim);
 
 static const char *const REMIND_TEXT[3] = {"Drink some water", "Stand up and stretch", "Breathe: 4 in, 4 out"};
@@ -146,7 +148,10 @@ class FsStorage : public lc::Storage {
     lp.putUInt("badcrc", 0); // a new (or removed) layout clears any "this one is bad" flag
     lp.end();
   }
-  uint8_t state_flags() override { return (uint8_t)((active ? lc::FL_LAYOUT_ACTIVE : 0) | (safe_reason ? lc::FL_SAFE_MODE : 0) | (file_exists() ? lc::FL_LAYOUT_STORED : 0)); }
+  uint8_t state_flags() override {
+    return (uint8_t)((active ? lc::FL_LAYOUT_ACTIVE : 0) | (safe_reason ? lc::FL_SAFE_MODE : 0) | (file_exists() ? lc::FL_LAYOUT_STORED : 0) |
+                     (ble_keys_available() ? lc::FL_BLE_KEYS : 0) | (ble_keys_connected() ? lc::FL_BLE_PAIRED : 0));
+  }
 };
 static FsStorage fs_store;
 static lc::Session session(fs_store);

@@ -246,6 +246,8 @@ const DEFAULT_KEYMAP = [1, 2, 1, 3, 10, 11]; // the original behaviour
 function keymapPacket(actions) { return pkt(0x08, actions.map((a) => a | 0)); }
 // WiFi mode (firmware built from the esp32dev_wifi env): credentials 0x09 (empty ssid = forget) and location 0x0A (degrees * 1e5, int32 LE)
 function wifiPacket(ssid, pass) { const s = clipUtf8(ssid || '', 32), p = clipUtf8(pass || '', 63); return pkt(0x09, [s.length, ...s, p.length, ...p]); }
+// Date packet 0x12: [year - 2000][month 1-12][day][weekday 0 = Sunday], for the date widget
+function datePacket(d) { return pkt(0x12, [d.getFullYear() - 2000, d.getMonth() + 1, d.getDate(), d.getDay()]); }
 function locationPacket(lat, lon) {
   const b = new Uint8Array(8), dv = new DataView(b.buffer);
   dv.setInt32(0, Math.round(lat * 1e5), true); dv.setInt32(4, Math.round(lon * 1e5), true);
@@ -508,7 +510,44 @@ const WIDGET_DEFS = {
   sh: { name: 'Shape / divider', w: 100, h: 4, o: ['k', 'c', 'o', 'r'] },
   sl: { name: 'Slider', w: 150, h: 16, o: ['k', 'c'] },
   ct: { name: 'Typing cat', w: 240, h: 132, fixed: true, o: [] }, // taps along with keys, buttons and the desktop app
+  pm: { name: 'Pomodoro', w: 120, h: 120, o: ['p', 'b', 'c'], def: { p: 25, b: 5 } },
+  cd: { name: 'Countdown', w: 170, h: 52, o: ['s', 'p', 'z', 'c'], def: { p: 17 * 60, s: 'Home time' } },
+  sw: { name: 'Stopwatch', w: 140, h: 36, o: ['z', 'c'] },
+  dt: { name: 'Date', w: 160, h: 22, o: ['k', 'z', 'a', 'c'] },
+  fs: { name: 'Focus sign', w: 200, h: 56, o: ['s'] },
+  bt: { name: 'Button', w: 104, h: 40, o: ['s', 'e', 'z', 'c', 'r'], def: { e: 1, s: 'Tap' } },
+  sp: { name: 'Spotify controls', w: 180, h: 44, o: ['c'] },
+  rm: { name: 'Reminder', w: 180, h: 32, o: ['k', 'p', 'z'], def: { p: 30 } },
 };
+// what the tappable widgets do on the board, shown in the property panel
+const WIDGET_HINT = {
+  pm: 'Tap: start / pause. Hold: reset. A beep and the cat say when work ends; the break starts by itself.',
+  sw: 'Tap: start / stop. Hold: reset.', fs: 'Tap to switch between busy and available. While it is in the layout the board LED shows it: red busy, green available.',
+  rm: 'Tap: done (the timer restarts). When it is time the board beeps, the cat smiles and a note appears.',
+  dt: 'The date comes from the web page (sent every minute). The desktop app does not send it.',
+  cd: 'Counts down to this time of day, then to the same time the next day.',
+  sp: 'Previous / play-pause / next. Needs the web page connected and signed in to Spotify (Premium).',
+  ct: 'Taps along with the board keys, button widgets, the desktop app and Bluetooth keys. Blinks, falls asleep, chases the mouse paw.',
+};
+// Bluetooth keys (button action "Bluetooth: key"): HID usage ids and modifier bits; arg g = (modifiers << 8) | usage
+const HID_MODS = [['Ctrl', 1], ['Shift', 2], ['Alt / Option', 4], ['Cmd / Win', 8]];
+const HID_KEYS = (() => {
+  const k = [];
+  for (let i = 0; i < 26; i++) k.push([String.fromCharCode(65 + i), 4 + i]);
+  for (let i = 1; i <= 9; i++) k.push([String(i), 0x1D + i]);
+  k.push(['0', 0x27], ['Enter', 0x28], ['Esc', 0x29], ['Backspace', 0x2A], ['Tab', 0x2B], ['Space', 0x2C], ['-', 0x2D], ['=', 0x2E],
+    ['[', 0x2F], [']', 0x30], ['\\', 0x31], [';', 0x33], ["'", 0x34], ['`', 0x35], [',', 0x36], ['.', 0x37], ['/', 0x38]);
+  for (let i = 1; i <= 12; i++) k.push(['F' + i, 0x39 + i]);
+  k.push(['Print Screen', 0x46], ['Home', 0x4A], ['Page Up', 0x4B], ['Delete', 0x4C], ['End', 0x4D], ['Page Down', 0x4E],
+    ['Right', 0x4F], ['Left', 0x50], ['Down', 0x51], ['Up', 0x52]);
+  return k;
+})();
+const MEDIA_KEYS = ['Play / pause', 'Next track', 'Previous track', 'Volume up', 'Volume down', 'Mute'];
+function hidName(g) {
+  const mods = HID_MODS.filter(([, b]) => (g >> 8) & b).map(([n]) => n.split(' ')[0]);
+  const key = HID_KEYS.find(([, u]) => u === (g & 0xFF));
+  return [...mods, key ? key[0] : '?'].join('+');
+}
 const WALLPAPERS = ['Sunny', 'Cloudy', 'Rainy', 'Stormy', 'Snowy', 'Night'];
 // what the board shows with nothing connected is a placeholder; the preview and dry run use this sample instead
 const SAMPLE = { h: 10, m: 9, s: 30, group: 0, tempC: 21, humidity: 48, wh: 10, wm: 5, title: 'Moonlight Sonata', artist: 'Beethoven', media: 1, cpu: 37, mem: 62, batt: 80, taps: 128, mood: 0 };
@@ -517,6 +556,7 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const deepCopy = (o) => JSON.parse(JSON.stringify(o));
 const snapTo = (v, g) => (g > 1 ? Math.round(v / g) * g : Math.round(v));
 
+const TEXT_TYPES = ['tx', 'bt', 'fs', 'cd']; // widgets whose text uses the board's 512 byte label pool
 function newPage() { return { main: false, bg: { t: 'w' }, w: [] }; }
 
 // Turns a validated layout object (schema v1) into editor state with ids.
@@ -542,11 +582,13 @@ function layoutFromState(st) {
     o.w = p.w.map((w) => {
       const r = { t: w.t, x: w.x, y: w.y, w: w.w, h: w.h };
       for (const k of ['k', 'z', 'a', 'r']) if (w[k]) r[k] = w[k];
+      for (const k of ['p', 'b', 'e', 'g', 'i']) if (w[k] !== undefined && w[k] !== null) r[k] = w[k];
       if (w.o !== undefined && w.o !== 255) r.o = w.o;
       if (w.f) r.f = 1;
       if (w.q) r.q = 1;
       if (w.c) r.c = w.c;
-      if (w.t === 'tx') r.s = w.s || '';
+      if (w.t === 'tx' || w.t === 'bt') r.s = w.s || '';
+      else if ((w.t === 'fs' || w.t === 'cd') && w.s) r.s = w.s;
       return r;
     });
     return o;
@@ -583,7 +625,7 @@ function createEditor(initial) {
       return null;
     },
     total() { return st.pages.reduce((n, p) => n + p.w.length, 0); },
-    textBytes() { return st.pages.reduce((n, p) => n + p.w.reduce((m, w) => m + (w.t === 'tx' ? utf8(w.s || '').length + 1 : 0), 0), 0); },
+    textBytes() { return st.pages.reduce((n, p) => n + p.w.reduce((m, w) => m + (TEXT_TYPES.includes(w.t) && (w.s || w.t === 'tx' || w.t === 'bt') ? utf8(w.s || '').length + 1 : 0), 0), 0); },
 
     // ---- pages ----
     addPage() {
@@ -613,9 +655,11 @@ function createEditor(initial) {
       if (page.main) return { ok: false, why: 'the original screen page cannot hold widgets' };
       if (page.w.length >= LAYOUT.MAX_WIDGETS_PAGE) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_PAGE + ' widgets per page' };
       if (ed.total() >= LAYOUT.MAX_WIDGETS_TOTAL) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_TOTAL + ' widgets in total' };
-      if (t === 'tx' && ed.textBytes() + 'Text'.length + 1 > LAYOUT.MAX_TEXT_POOL) return { ok: false, why: 'label text budget is full' };
+      const defText = t === 'tx' ? 'Text' : (d.def && d.def.s) || '';
+      if (defText && ed.textBytes() + utf8(defText).length + 1 > LAYOUT.MAX_TEXT_POOL) return { ok: false, why: 'label text budget is full' };
       const off = (page.w.length % 6) * 8; // cascade so new widgets do not hide each other
       const w = { id: nextId(), t, x: clamp(snapTo((LAYOUT.W - d.w) / 2, ed.grid) + off, 0, LAYOUT.W - d.w), y: clamp(snapTo((LAYOUT.H - d.h) / 2, ed.grid) + off, 0, LAYOUT.H - d.h), w: d.w, h: d.h };
+      if (d.def) Object.assign(w, deepCopy(d.def));
       if (t === 'tx') w.s = 'Text';
       ed.edit(() => page.w.push(w));
       return { ok: true, id: w.id };
@@ -648,7 +692,7 @@ function createEditor(initial) {
       const page = st.pages[f.pi], d = WIDGET_DEFS[f.w.t];
       if (page.w.length >= LAYOUT.MAX_WIDGETS_PAGE) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_PAGE + ' widgets per page' };
       if (ed.total() >= LAYOUT.MAX_WIDGETS_TOTAL) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_TOTAL + ' widgets in total' };
-      if (f.w.t === 'tx' && ed.textBytes() + utf8(f.w.s || '').length + 1 > LAYOUT.MAX_TEXT_POOL) return { ok: false, why: 'label text budget is full' };
+      if (TEXT_TYPES.includes(f.w.t) && f.w.s && ed.textBytes() + utf8(f.w.s || '').length + 1 > LAYOUT.MAX_TEXT_POOL) return { ok: false, why: 'label text budget is full' };
       const c = Object.assign(deepCopy(f.w), { id: nextId() });
       c.x = clamp(c.x + 8, 0, LAYOUT.W - c.w); c.y = clamp(c.y + 8, 0, LAYOUT.H - c.h);
       ed.edit(() => page.w.splice(f.wi + 1, 0, c));
@@ -780,11 +824,12 @@ function feed(bytes) {
       continue;
     }
     rxBuf.push(b);
-    if (rxState === 1) { rxState = (b === 0x05 || b === 0x10) ? 2 : 0; continue; }
+    if (rxState === 1) { rxState = (b === 0x05 || b === 0x10 || b === 0x13) ? 2 : 0; continue; }
     if (rxState === 2) { rxLen = b; rxState = 3; continue; }
     if (rxBuf.length >= 3 + rxLen) {
       rxState = 0;
       if (rxBuf[1] === 0x10) { const a = parseLayoutAck(Uint8Array.from(rxBuf)); if (a) onAck(a); continue; } // layout upload ack
+      if (rxBuf[1] === 0x13) { if (rxLen === 3) onBoardEvent(rxBuf[3], rxBuf[4] | (rxBuf[5] << 8)); continue; } // button widget event
       const count = (rxBuf[5] | (rxBuf[6] << 8) | (rxBuf[7] << 16) | (rxBuf[8] << 24)) >>> 0;
       const key = rxBuf[3] === 0 ? 'Key1+Key2' : 'Key' + rxBuf[3];
       log(`key event: ${key} ${KEY_TYPES[rxBuf[4]] || 'type ' + rxBuf[4]}, lifetime taps ${count}`);
@@ -846,6 +891,7 @@ async function onTick() {
   await send(sourcePacket(SRC_WEB), 'source=web');
   await send(statusPacket({ evt: 0, cpu: 0, mem: 0, batt: battery ? Math.round(battery.level * 100) : 0, chg: battery ? battery.charging : false,
     h: d.getHours(), m: d.getMinutes(), s: d.getSeconds(), media: +$('media').value }), 'status');
+  if (ticks % 60 === 1) await send(datePacket(d), 'date'); // date widget
   if (ticks % 900 === 0) fetchWeather(true);
   if (ticks % 4 === 0) spPoll(); // driven by the worker tick so a background tab keeps polling
 }
@@ -907,7 +953,24 @@ $('btnWifi').onclick = async () => {
 $('btnWifiForget').onclick = () => send(wifiPacket('', ''), 'wifi credentials');
 
 // ---- Spotify: Authorization Code with PKCE, no client secret. Needs an https (or http://127.0.0.1) page address ----
-const SP_SCOPES = 'user-read-currently-playing user-read-playback-state';
+const SP_SCOPES = 'user-read-currently-playing user-read-playback-state user-modify-playback-state'; // modify: board buttons (needs a new sign-in)
+// Button widgets on the board send event 0x13: Spotify control, or a numbered event that is only logged
+let spPlaying = false;
+async function onBoardEvent(action, arg) {
+  const name = (BTN_ACTIONS[action] || { name: 'action ' + action }).name;
+  if (action === 18) { log('board button: event ' + arg); return; }
+  if (action < 15 || action > 17) { log('board event: ' + name); return; }
+  if (!sp) { log('board button "' + name + '": sign in to Spotify on this page first'); return; }
+  const [method, path] = action === 15 ? ['PUT', spPlaying ? 'pause' : 'play'] : ['POST', action === 16 ? 'next' : 'previous'];
+  try {
+    if (Date.now() > sp.exp && !(await spRefresh())) return;
+    const r = await fetch('https://api.spotify.com/v1/me/player/' + path, { method, headers: { Authorization: 'Bearer ' + sp.access } });
+    if (r.status === 204 || r.status === 200 || r.status === 202) { log('Spotify: ' + path); if (action === 15) spPlaying = !spPlaying; setTimeout(spPoll, 600); }
+    else if (r.status === 403 || r.status === 401) log('Spotify refused "' + path + '" (HTTP ' + r.status + '): it needs Premium, and a new sign-in to allow playback control (Sign out, then Sign in)');
+    else if (r.status === 404) log('Spotify: no active player. Start playing on a device first.');
+    else log('Spotify ' + path + ': HTTP ' + r.status);
+  } catch (e) { log('Spotify ' + path + ' failed: ' + e.message); }
+}
 const spRedirect = location.origin + location.pathname;
 let sp = null; try { sp = JSON.parse(load('sp_tok') || 'null'); } catch (e) {}
 let spBusy = false, spLastKey = '';
@@ -965,6 +1028,7 @@ async function spPoll() {
     if (r.status !== 200 && r.status !== 204) { log('Spotify answered HTTP ' + r.status); return; }
     const info = spotifyInfo(r.status === 204 ? null : await r.json());
     $('media').value = info.state;
+    spPlaying = info.state === 1;
     const key = info.title + ' ' + info.artist;
     if (key !== spLastKey) { spLastKey = key; $('title').value = info.title; $('artist').value = info.artist; await sendMusicNow(); log('Spotify: ' + (info.title ? info.title + ' - ' + info.artist : 'nothing playing')); }
   } catch (e) { log('Spotify poll failed: ' + e.message); }
@@ -1052,6 +1116,42 @@ function drawWidget(w, s, box) {
     case 'mc':
       box.style.background = 'url(' + PREVIEW_ART.cat + ') 0 0/200px 132px no-repeat';
       break;
+    case 'pm': { // ring + time + phase, like layout.cpp W_POMO (idle: shows the work length)
+      const d = Math.min(w.w, w.h), aw = Math.max(4, Math.floor(d / 12)), acc = w.c || '#FBC979';
+      el('div', 'position:absolute;left:' + (w.w - d) / 2 + 'px;top:' + (w.h - d) / 2 + 'px;width:' + d + 'px;height:' + d + 'px;border-radius:50%;box-sizing:border-box;border:' + aw + 'px solid #303030;border-top-color:' + acc + ';transform:rotate(45deg)', box);
+      const t = el('div', 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;font:' + (d >= 100 ? '20px/22px' : '14px/16px') + ' Montserrat,system-ui;color:#fff', box);
+      t.innerHTML = two(w.p || 25) + ':00<span style="font-size:14px;color:#A99BB3">tap to start</span>'; break;
+    }
+    case 'cd': case 'sw': case 'dt': {
+      if (w.t !== 'dt') box.classList.add('panel');
+      let t;
+      if (w.t === 'sw') t = '00:00.0';
+      else if (w.t === 'dt') { const d = new Date(), M = d.toLocaleString('en', { month: 'long' }); t = [d.toLocaleString('en', { weekday: 'short' }) + ' ' + d.getDate() + ' ' + M.slice(0, 3), d.toISOString().slice(0, 10), M + ' ' + d.getDate()][w.k | 0]; }
+      else { let left = (w.p | 0) * 60 - (s.h * 3600 + s.m * 60 + s.s); if (left < 0) left += 86400; t = Math.floor(left / 3600) + ':' + two(Math.floor(left / 60) % 60) + ':' + two(left % 60); }
+      const lab = el('div', 'position:absolute;left:0;right:0;' + (w.t === 'cd' && w.s ? 'bottom:4px' : 'top:50%;transform:translateY(-50%)') + ';font:' + font + ' Montserrat,system-ui;color:' + col + ';text-align:' + (w.t === 'dt' ? AL[w.a | 0] : 'center'), box, 'lbl');
+      lab.textContent = t;
+      if (w.t === 'cd' && w.s) { const c = el('div', 'position:absolute;left:0;right:0;top:4px;font:14px/16px Montserrat,system-ui;color:#A99BB3;text-align:center', box, 'lbl'); c.textContent = w.s; }
+      break;
+    }
+    case 'fs': case 'rm': {
+      const busy = w.t === 'fs';
+      box.style.cssText += ';border-radius:10px;display:flex;align-items:center;justify-content:center;text-align:center;background:' + (busy ? '#B3261E' : 'rgba(0,0,0,.31)');
+      const l = el('div', 'font:' + (busy && w.h >= 40 ? '20px/22px' : font) + ' Montserrat,system-ui;color:#fff', box);
+      l.textContent = busy ? (w.s || 'Focus') : ['Water', 'Stretch', 'Breathe'][w.k | 0] + ' in ' + (w.p || 30) + ' min'; break;
+    }
+    case 'bt': {
+      box.style.cssText += ';display:flex;align-items:center;justify-content:center;overflow:hidden;box-shadow:0 2px 4px rgba(0,0,0,.4);border-radius:' + (w.r || 8) + 'px;background:' + (w.c || '#FBC979');
+      const l = el('div', 'font:' + font + ' Montserrat,system-ui;color:#000;white-space:nowrap', box); l.textContent = w.s || '';
+      break;
+    }
+    case 'sp': {
+      const bw = (w.w - 12) / 3;
+      ['\u23EE', '\u25B6', '\u23ED'].forEach((sym, k) => {
+        const b = el('div', 'position:absolute;top:0;bottom:0;left:' + k * (bw + 6) + 'px;width:' + bw + 'px;border-radius:8px;display:flex;align-items:center;justify-content:center;font:18px system-ui;color:#000;background:' + (w.c || '#FBC979'), box);
+        b.textContent = JSON.parse('"' + sym + '"');
+      });
+      break;
+    }
     case 'ct': { // same parts and offsets as the board (layout.cpp W_TCAT); the paw taps once a second here
       box.style.background = 'url(' + PREVIEW_ART.cat + ') 20px 0/200px 132px no-repeat';
       const up = s.s % 2 === 0;
@@ -1186,16 +1286,32 @@ function renderProps(force) {
   h += '<div class="row">' + ['x', 'y', 'w', 'h'].map((k) => '<label style="min-width:0">' + k + '</label> <input type="number" data-k="' + k + '"' + (d.fixed && (k === 'w' || k === 'h') ? ' disabled' : '') + '>').join(' ') + '</div>';
   if (d.fixed) h += '<div class="mute">Fixed size on the board (' + d.w + 'x' + d.h + ').</div>';
   for (const k of d.o) {
-    if (k === 's') h += opt('Text', '<input type="text" data-k="s" style="width:180px"> <span class="err" id="pErr"></span>');
+    if (k === 's') h += opt(w.t === 'fs' ? 'Busy text' : w.t === 'cd' ? 'Caption' : w.t === 'bt' ? 'Label' : 'Text', '<input type="text" data-k="s" style="width:180px" placeholder="' + (w.t === 'fs' ? 'Focus' : w.t === 'cd' ? 'none' : '') + '"> <span class="err" id="pErr"></span>');
+    if (k === 'p' && w.t === 'cd') h += opt('Count to', '<input type="time" id="pTime" value="' + two(Math.floor((w.p | 0) / 60)) + ':' + two((w.p | 0) % 60) + '">');
+    else if (k === 'p') h += opt(w.t === 'pm' ? 'Focus (min)' : 'Every (min)', '<input type="number" data-k="p" min="' + (w.t === 'pm' ? 1 : 5) + '" max="' + (w.t === 'pm' ? 180 : 240) + '">');
+    if (k === 'b') h += opt('Break (min)', '<input type="number" data-k="b" min="1" max="60">');
+    if (k === 'e') {
+      h += opt('Action', '<select data-k="e">' + BTN_ACTIONS.map((a, i) => '<option value="' + i + '">' + a.name + (a.ble ? ' (Bluetooth build)' : a.page ? ' (web page)' : '') + '</option>').join('') + '</select>');
+      const a = BTN_ACTIONS[w.e | 0];
+      if (a.arg === 'key') {
+        h += opt('Shortcut', HID_MODS.map(([n, b]) => '<label style="min-width:0;margin-right:6px"><input type="checkbox" class="hidMod" value="' + b + '"' + (((w.g | 0) >> 8) & b ? ' checked' : '') + '> ' + n + '</label>').join('') +
+          ' <select id="hidKey">' + HID_KEYS.map(([n, u]) => '<option value="' + u + '"' + (((w.g | 0) & 0xFF) === u ? ' selected' : '') + '>' + n + '</option>').join('') + '</select>');
+        h += '<div class="mute">Sends ' + esc(hidName(w.g | 0)) + ' to the paired computer. Works only with the Bluetooth keyboard firmware.</div>';
+      } else if (a.arg === 'media key') h += opt('Media key', '<select id="hidMedia">' + MEDIA_KEYS.map((n, i) => '<option value="' + i + '"' + ((w.g | 0) === i ? ' selected' : '') + '>' + n + '</option>').join('') + '</select>');
+      else if (a.arg) h += opt('Event number', '<input type="number" data-k="g" min="0" max="65535">') + '<div class="mute">The page log shows it when the button is tapped.</div>';
+      else if (a.page) h += '<div class="mute">Runs on the web page: it must be connected (and signed in to Spotify, Premium).</div>';
+    }
     if (k === 'f') h += opt('', '<label style="min-width:0"><input type="checkbox" data-k="f"> 24-hour</label>');
     if (k === 'q') h += opt('', '<label style="min-width:0"><input type="checkbox" data-k="q"> show seconds</label>');
     if (k === 'z') h += opt('Size', sel('z', ['Small (14 px)', 'Large (20 px)']));
     if (k === 'a') h += opt('Align', sel('a', ['Left', 'Center', 'Right']));
-    if (k === 'k') h += opt(w.t === 'wx' ? 'Unit' : w.t === 'sh' ? 'Shape' : 'Controls', sel('k', w.t === 'wx' ? ['Board setting', '°C', '°F'] : w.t === 'sh' ? ['Rectangle', 'Ellipse'] : ['Brightness', 'Volume']));
+    if (k === 'k') h += opt({ wx: 'Unit', sh: 'Shape', dt: 'Format', rm: 'Reminder' }[w.t] || 'Controls', sel('k', { wx: ['Board setting', '°C', '°F'], sh: ['Rectangle', 'Ellipse'], dt: ['Thu 29 Oct', '2026-10-29', 'October 29'], rm: ['Drink water', 'Stand and stretch', 'Breathe'] }[w.t] || ['Brightness', 'Volume']));
     if (k === 'c') h += opt('Color', '<input type="color" data-k="c"> <button class="ghost" id="pCDef" style="padding:3px 8px;font-size:12px">default</button>');
     if (k === 'o') h += opt('Opacity', '<input type="range" min="0" max="255" data-k="o">');
     if (k === 'r') h += opt('Corners', '<input type="number" min="0" max="120" data-k="r">');
   }
+  if (WIDGET_HINT[w.t]) h += '<div class="mute" style="margin-top:6px">' + WIDGET_HINT[w.t] + '</div>';
+  if (WIDGET_LEVEL[w.t]) h += '<div class="mute">Needs firmware from Phase 3 or later.</div>';
   h += '<div class="row"><button class="ghost" id="pDup">Duplicate</button><button class="ghost" id="pRm">Delete</button></div>';
   h += '<div class="row"><span class="mute">Order</span> <button class="ghost" id="zF">To front</button><button class="ghost" id="zU">Up</button><button class="ghost" id="zD">Down</button><button class="ghost" id="zB">To back</button></div>';
   box.innerHTML = h;
@@ -1208,8 +1324,13 @@ function renderProps(force) {
       i.oninput = () => { const r = ed.setProp(selId, 's', i.value); $('pErr').textContent = r.ok ? '' : r.why; i.style.borderColor = r.ok ? '' : 'var(--bad)'; };
     } else if (i.type === 'checkbox') i.onchange = () => { ed.begin(); ed.setProp(selId, k, i.checked ? 1 : 0); ed.end(); };
     else if (i.type === 'color' || i.type === 'range') { i.oninput = () => { ed.begin(); ed.setProp(selId, k, i.type === 'range' ? +i.value : i.value); }; i.onchange = () => ed.end(); }
+    else if (k === 'e') i.onchange = () => { ed.begin(); ed.setProp(selId, 'e', +i.value); const a = BTN_ACTIONS[+i.value]; ed.setProp(selId, 'g', a.arg === 'key' ? 0x0804 /* Cmd+A */ : 0); ed.end(); renderProps(true); };
     else i.onchange = () => { ed.begin(); ed.setProp(selId, k, +i.value); ed.end(); };
   });
+  if ($('pTime')) $('pTime').onchange = (e) => { const [hh, mm] = e.target.value.split(':').map(Number); if (isFinite(hh) && isFinite(mm)) { ed.begin(); ed.setProp(selId, 'p', hh * 60 + mm); ed.end(); } };
+  const setHid = () => { let g = +$('hidKey').value; box.querySelectorAll('.hidMod').forEach((c) => { if (c.checked) g |= (+c.value) << 8; }); ed.begin(); ed.setProp(selId, 'g', g); ed.end(); renderProps(true); };
+  if ($('hidKey')) { $('hidKey').onchange = setHid; box.querySelectorAll('.hidMod').forEach((c) => (c.onchange = setHid)); }
+  if ($('hidMedia')) $('hidMedia').onchange = (e) => { ed.begin(); ed.setProp(selId, 'g', +e.target.value); ed.end(); };
   if ($('pCDef')) $('pCDef').onclick = () => { ed.begin(); ed.setProp(selId, 'c', ''); ed.end(); renderProps(true); };
   $('pDup').onclick = dupSel; $('pRm').onclick = delSel;
   $('zF').onclick = () => ed.z(selId, 'front'); $('zU').onclick = () => ed.z(selId, 'up'); $('zD').onclick = () => ed.z(selId, 'down'); $('zB').onclick = () => ed.z(selId, 'back');

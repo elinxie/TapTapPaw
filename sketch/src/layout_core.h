@@ -136,7 +136,7 @@ enum Status : uint8_t {
   ST_INCOMPLETE = 10
 };
 
-enum Flags : uint8_t { FL_LAYOUT_ACTIVE = 1, FL_SAFE_MODE = 2, FL_SESSION_OPEN = 4, FL_LAYOUT_STORED = 8 };
+enum Flags : uint8_t { FL_LAYOUT_ACTIVE = 1, FL_SAFE_MODE = 2, FL_SESSION_OPEN = 4, FL_LAYOUT_STORED = 8, FL_BLE_KEYS = 16, FL_BLE_PAIRED = 32 };
 
 constexpr size_t ACK_FRAME_BYTES = 3 + 12;
 

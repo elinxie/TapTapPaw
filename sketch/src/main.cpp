@@ -20,6 +20,7 @@ const String version = String(firmware_version) + " | " __DATE__ "-" __TIME__;
 #include "animation.h"
 #include "keymap.h"
 #include "layout.h"
+void ble_keys_begin(); // ble_keys.cpp
 #include "power.h"
 #include "ui/ui.h"
 #include "ui_ext.h"
@@ -844,6 +845,7 @@ void setup() {
   ui_ext_init(); // "More >" button + extra settings screen
   layout_begin(boot_held_at_power_up); // custom widget layout from LittleFS, with safe mode (layout.cpp)
   wifi_sync_begin(); // WiFi mode task (no-op in the normal build)
+  ble_keys_begin(); // Bluetooth keyboard (esp32dev_ble build only, else a no-op)
   
   //test sound effect
   /*

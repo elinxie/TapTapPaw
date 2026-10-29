@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const code = html.split('<script>')[1].split('// ---- UI ----')[0];
-const lib = new Function(code + '; return { pkt, statusPacket, weatherPacket, settingsPacket, moodPacket, sourcePacket, firmwareRequest, musicPacket, classify, SRC_WEB, keymapPacket, KEY_ACTIONS, KEY_SLOTS, DEFAULT_KEYMAP, b64url, pkceChallenge, spotifyInfo, wifiPacket, locationPacket };')();
+const lib = new Function(code + '; return { pkt, statusPacket, weatherPacket, settingsPacket, moodPacket, sourcePacket, firmwareRequest, musicPacket, classify, SRC_WEB, keymapPacket, KEY_ACTIONS, KEY_SLOTS, DEFAULT_KEYMAP, b64url, pkceChallenge, spotifyInfo, wifiPacket, locationPacket, datePacket };')();
 const arr = (u8) => Array.from(u8);
 
 // status: [FF 01 09 evt cpu mem batt chg h m s media]
@@ -30,6 +30,9 @@ assert.deepEqual(arr(lib.settingsPacket({ fahrenheit: true, invert: true })), [0
 assert.deepEqual(arr(lib.moodPacket(2)), [0xFF, 0x06, 1, 2]);
 assert.deepEqual(arr(lib.sourcePacket(lib.SRC_WEB)), [0xFF, 0x07, 1, 2]);
 assert.deepEqual(arr(lib.firmwareRequest()), [0xFF, 0x00]);
+
+// date: [FF 12 04 year-2000 month day weekday]
+assert.deepEqual(arr(lib.datePacket(new Date(2026, 9, 29))), [0xFF, 0x12, 4, 26, 10, 29, 4]);
 
 // key map: six action ids; defaults match KeyAction numbering in sketch/src/keymap.h
 assert.deepEqual(arr(lib.keymapPacket(lib.DEFAULT_KEYMAP)), [0xFF, 0x08, 6, 1, 2, 1, 3, 10, 11]);

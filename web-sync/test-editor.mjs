@@ -31,11 +31,11 @@ for (const t of TEMPLATES) {
   const ed = createEditor();
   assert.equal(ed.state.pages.length, 1);
   assert.equal(ed.toJSON().text, '{"v":1,"pg":[{"w":[]}]}');
-  for (const t of TYPES) { const r = ed.addWidget(0, t); assert.equal(r.ok, true, t); }
+  TYPES.forEach((t, i) => { if (i && i % 12 === 0) ed.addPage(); const r = ed.addWidget(Math.floor(i / 12), t); assert.equal(r.ok, true, t); }); // 12 per page
   const out = ed.toJSON();
   assert.equal(out.ok, true, out.err);
-  assert.ok(out.size < 1000, 'ten default widgets are small: ' + out.size);
-  for (const w of ed.state.pages[0].w) {
+  assert.ok(out.size < 2000, 'one of each widget is small: ' + out.size);
+  for (const w of ed.state.pages.flatMap((p) => p.w)) {
     const d = WIDGET_DEFS[w.t];
     assert.ok(w.x >= 0 && w.y >= 0 && w.x + w.w <= LAYOUT.W && w.y + w.h <= LAYOUT.H, w.t + ' inside the screen');
     assert.equal(w.w, d.w); assert.equal(w.h, d.h);
