@@ -286,7 +286,18 @@ const LAYOUT = { VERSION: 1, MAX_BYTES: 4096, MAX_PAGES: 6, MAX_WIDGETS_PAGE: 12
 const LAYOUT_ERRORS = ['ok', 'empty', 'too big', 'syntax error', 'nested too deep', 'unsupported version', 'no pages', 'too many pages', 'bad page',
   'second main page', 'too many widgets', 'unknown widget type', 'widget outside the 240x320 screen', 'bad color', 'value out of range',
   'bad text', 'text pool full', 'trailing data'];
-const WIDGET_TYPES = ['', 'ac', 'dc', 'wx', 'np', 'sb', 'tc', 'tx', 'mc', 'sh', 'sl'];
+const WIDGET_TYPES = ['', 'ac', 'dc', 'wx', 'np', 'sb', 'tc', 'tx', 'mc', 'sh', 'sl', 'ct', 'pm', 'cd', 'sw', 'dt', 'fs', 'bt', 'sp', 'aa', 'rm', 'pc'];
+// firmware feature level each widget type needs (QUERY ack detail; firmware before Phase 3 answers 0)
+const WIDGET_LEVEL = { ct: 2, pm: 2, cd: 2, sw: 2, dt: 2, fs: 2, bt: 2, sp: 2, aa: 2, rm: 2, pc: 2 };
+// button actions, same order as BtnAction in sketch/src/layout_core.h. arg: what "g" means. ble: needs the Bluetooth keyboard build.
+const BTN_ACTIONS = [
+  { name: 'None' }, { name: 'Cat taps (+1 tap)' }, { name: 'Cat happy' }, { name: 'Cat sleepy' }, { name: 'Toggle C/F' }, { name: 'Mute / unmute' },
+  { name: 'Brightness step' }, { name: 'Next wallpaper' }, { name: 'Next page' }, { name: 'Previous page' }, { name: 'Pomodoro start/pause' },
+  { name: 'Pomodoro reset' }, { name: 'Focus sign on/off' }, { name: 'Stopwatch start/stop' }, { name: 'Stopwatch reset' },
+  { name: 'Spotify play/pause', page: true }, { name: 'Spotify next', page: true }, { name: 'Spotify previous', page: true },
+  { name: 'Event to the page (logged)', page: true, arg: 'event number' },
+  { name: 'Bluetooth: key / shortcut', ble: true, arg: 'key' }, { name: 'Bluetooth: media key', ble: true, arg: 'media key' },
+];
 const LAYOUT_STATUS = ['ok', 'bad packet', 'bad sequence', 'too big', 'checksum mismatch', 'unsupported', 'no space', 'flash write error', 'invalid layout', 'no upload in progress', 'incomplete'];
 const LAYOUT_FLAGS = { ACTIVE: 1, SAFE_MODE: 2, SESSION_OPEN: 4, STORED: 8 };
 const LERR = {}; LAYOUT_ERRORS.forEach((n, i) => { LERR[n] = i; });
@@ -368,12 +379,13 @@ function checkBg(b) {
   let t = 'w', idx = -1, hc = false, hd = false, e;
   for (const k of Object.keys(b)) {
     const v = b[k];
-    if (k === 't') { if (typeof v !== 'string') return 'syntax error'; if (!['w', 'b', 's', 'g'].includes(v)) return 'bad page'; t = v; }
-    else if (k === 'i') { e = intIn(v, 0, 5); if (e) return e; idx = v; }
+    if (k === 't') { if (typeof v !== 'string') return 'syntax error'; if (!['w', 'b', 's', 'g', 'i'].includes(v)) return 'bad page'; t = v; }
+    else if (k === 'i') { e = intIn(v, 0, 7); if (e) return e; idx = v; }
     else if (k === 'c') { e = colorErr(v); if (e) return e; hc = true; }
     else if (k === 'd') { e = colorErr(v); if (e) return e; hd = true; }
   }
-  if (t === 'b' && idx < 0) return 'value out of range';
+  if (t === 'b' && (idx < 0 || idx > 5)) return 'value out of range';
+  if (t === 'i' && idx < 0) return 'value out of range';
   if (t === 's' && !hc) return 'bad color';
   if (t === 'g' && !(hc && hd)) return 'bad color';
   return null;
@@ -381,7 +393,7 @@ function checkBg(b) {
 
 function checkWidget(w, st) {
   if (w === null || typeof w !== 'object' || Array.isArray(w)) return 'syntax error';
-  let type = 0, hx = false, hy = false, hw = false, hh = false, k = 0, text = null, e;
+  let type = 0, hx = false, hy = false, hw = false, hh = false, k = 0, text = null, e, p = null, ev = null, slot = null;
   const g = {};
   for (const key of Object.keys(w)) {
     const v = w[key];
@@ -399,6 +411,11 @@ function checkWidget(w, st) {
     else if (key === 'o') { e = intIn(v, 0, 255); if (e) return e; }
     else if (key === 'f' || key === 'q') { e = intIn(v, 0, 1); if (e) return e; }
     else if (key === 'c') { e = colorErr(v); if (e) return e; }
+    else if (key === 'p') { e = intIn(v, 0, 1439); if (e) return e; p = v; }
+    else if (key === 'b') { e = intIn(v, 1, 60); if (e) return e; }
+    else if (key === 'e') { e = intIn(v, 0, 63); if (e) return e; ev = v; }
+    else if (key === 'g') { e = intIn(v, 0, 65535); if (e) return e; }
+    else if (key === 'i') { e = intIn(v, 0, 7); if (e) return e; slot = v; }
     else if (key === 's') {
       if (typeof v !== 'string') return 'syntax error';
       if (/[\u0000-\u001F]/.test(v) || BAD_SURROGATE.test(v)) return 'syntax error';
@@ -410,6 +427,19 @@ function checkWidget(w, st) {
   if (!(hx && hy && hw && hh)) return 'widget outside the 240x320 screen';
   if (g.x < 0 || g.y < 0 || g.w < 1 || g.h < 1 || g.x + g.w > LAYOUT.W || g.y + g.h > LAYOUT.H) return 'widget outside the 240x320 screen';
   if ((type === 10 || type === 9) && k > 1) return 'value out of range'; // slider, shape
+  const t = WIDGET_TYPES[type];
+  if (t === 'ct' && (g.w !== 240 || g.h !== 132)) return 'widget outside the 240x320 screen';
+  if (t === 'aa' && (g.w !== 96 || g.h !== 96)) return 'widget outside the 240x320 screen';
+  if (t === 'pm' && (p !== null && (p < 1 || p > 180))) return 'value out of range';
+  if (t === 'cd' && p === null) return 'value out of range';
+  if (t === 'rm' && (p !== null && (p < 5 || p > 240))) return 'value out of range';
+  if (t === 'bt') { if (ev === null || ev >= BTN_ACTIONS.length) return 'value out of range'; if (text === null || text.length === 0) return 'bad text'; }
+  if (t === 'pc' && slot === null) return 'value out of range';
+  if ((t === 'bt' || t === 'fs' || t === 'cd') && text) {
+    const n = utf8(text).length;
+    if (st.text + n + 1 > LAYOUT.MAX_TEXT_POOL) return 'text pool full';
+    st.text += n + 1;
+  }
   if (type === 7) {
     if (text === null || text.length === 0) return 'bad text';
     const n = utf8(text).length;
@@ -477,6 +507,7 @@ const WIDGET_DEFS = {
   mc: { name: 'Mood cat', w: 200, h: 132, fixed: true, o: [] },
   sh: { name: 'Shape / divider', w: 100, h: 4, o: ['k', 'c', 'o', 'r'] },
   sl: { name: 'Slider', w: 150, h: 16, o: ['k', 'c'] },
+  ct: { name: 'Typing cat', w: 240, h: 132, fixed: true, o: [] }, // taps along with keys, buttons and the desktop app
 };
 const WALLPAPERS = ['Sunny', 'Cloudy', 'Rainy', 'Stormy', 'Snowy', 'Night'];
 // what the board shows with nothing connected is a placeholder; the preview and dry run use this sample instead
@@ -705,6 +736,9 @@ const PREVIEW_ART = {
   i3: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAABQklEQVR42u2WwUoCURSGP8dciC4iaBO00LVuBBdR9AA9QOseIXcudOXeJxARXChISi9QYG0S6x1aFEErF6IQVJsbyGXmeme4x5rwh1nMcJhz5v//88+FX0ZCu98FTgFPqN8X8AC8BRUMVJHkNVltuKMNcA+c+DDjErdsYTDhz7MeUBLq2QUapoIMsBQ04ZPJhABzZcSC0BqO/7QHDoAzx0G0VPmysCm+FtK9GtRQ98AQyAkwcLMNnDBBpOMSqDuUpQNUTDmgowzsOfzoo7AMZIFjhwxMgfdYecAPeeAcSFquYQuYuRz8KmQQ1WyDyBZtdX70LBkYxToHgpAyMPABfEoOXlMNgjR/VhKtRdTdPlzD3j6QlpQgBRQNa/gKvPybn5EfisCFJuEQuNvU4CMf4z1GeVHUIGqqgPFWTrv9WB5IvgHsI4Pynz9MPwAAAABJRU5ErkJggg==',
   i4: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADI0lEQVR42sXXXYhVVRQH8N9oTo5ZYlCK9BAhYUFRWilIYSkJPqQolRZF0Wvmi5GC9CBUUFAPRQ9DREiFFFT2MYWJJjGm9AFKpqQmlmMZlWhmZuPcXtaBxebcm94ZZhYcztl7r73Xf63932uvM1r70oFuXI/PjYBMQAOHB7PIqCEA0jHcAF7FK+hMfRPxPtYMR+gPReg3xvt3fBXfnwwHgGvwcxjMz05cNpSGpuORJntcgmhmfCwew5XnYnAaFiVebIrFZzYh3A0xfjwZL8E+FDovJkD3YXIdgC2h/CVm47loV8TqxH5sD4+qY9gX4zfHeObBG6HzMBbjQLRfrgMwB/tCYQC74/uzGB+DE9H3Bx5IAB7F6Wh/n6LxS/TtTtu1Hdc224YL8XiEtZrwT3gLH9SQr3w+Dd0ZRX9fgO5olQcmoSuOmhT6nbgneAE/hseV/IbX47sPKxKQSg4EVya0IuLbCfGpWKQ39f0Q7/2YlUh4BZ6Mdn/S78E2/Jv61rYCMDMU5kUkqr1cGl7nkM5Kob0aX6exQ7i9uDcW4mlcdT65YCzuwDPYVQA4Ge8zwZOSC1txd5C3LekK7/KiJyLnv1f0n8ULuA4birHedgGMwRdpoQGsw734psbjHTWA+2POoOQ2vBWhbtQQ8lQ679WzHktw6flex4vjJCyPfC9uuj3hTSXdKUUfw7Jinbm4PE7IKNyEVXgHt7QCtK7w5KeoeKpwVglqYeSFBv7CrYmUW9P8fZEj8pqrWwG4KJi7rYbRN8Y+N/BRcCJnyypNL8L8Iv028C4W4IJWACZHxXO2OG5V9XO0MNqIJJP1XwrdqQWAv/EUxjcz/mAK8UlsTtkMxiWv90bYq0R0J36N9ndpzYOpUupP+nPqSLgMF+PNqA32pLpAeNyD1+Lq3ZXmbowt6olrXTH3wxjfjCm4qy4CExPz4ePwuNnVOT+RcFoTnSWh83xRaXWdy/mfEoVJncwNw9X+HmkCoiO255KhrBVL4/8HYsjlWBjsjvfRdDf0DgeAJ7CyqAk78SzuH4l/w76R+jccKN5tyehBzD2DPyPFftvuIv8BW/lApQbzLKUAAAAASUVORK5CYII=',
   i5: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAADC0lEQVR42rWXT4hPURTHP+/NHyNlBhMiEhE2I9nKDilZCWUjFkgMmoW96VdqVpRSspdYIRt/Q2RmKAsi+ZsR2RhjZn6/+T2b760z173vvd9Mbt3ue+/ee873nO8959wH8dZsnucDJ4AB4B7Qpu8JU2uF+1o0tgEVYBjI1D8ArQ0ASIAmyTwNbPN0RC3fBHwyimvAGLBG800NWrtUcu7kecIJPWQUjwHjeu4uQh8xqBe4KxlfgGvGE/9YflwL67J6Qu+vGuHQrJkrWZkxJAMuhDjfqckJo9htOlrC+lSKEw/EQuCA5DwH1gOz7CaAZXJ3ZpQ75FXN2/VlPeBonS1ZF818YhfcDLippvFFgeudjHPAY+MlH8RiY/kkWZuNpZnp7v1KIDe4NkPjOrPvmL7NDNARNORWAYDzOQBcu272fQXmBBSmIeUrA5w3AmAHMBg4vEPKnoVJ60iAex/AZQ+AG/sC58UBccY8ywOQAhtzFiTGS0gwEows/2MOWhbY+6AoXAYDFmQeJWNKpTYMU5NoKma/G68Ca8vE6zcv9mM0HA4kIlsPzpg9TyJVNdhiin1uX0aociA6gVGt3eqFaG4biURAyAsHtac1AmKvCk9D9eJdAQUW3CiwPFIT0gaK1aR0fj/nEIaoeKu8HvNEEecWeJoqCvBCKJbva8AKoF/FaVzWtMjqCa0JubpZMqq64j0FHgFsj6ThWHcJawTYH3Bts9f96rkL+CEZn1F1GipxDrJI1hsA9gELcrw3D9gDPPTkVBITwz3yQtnrlgPsOB9W2X4NfNd8J7AK6ALata4mr6TAasyN5XeJcIx5owx9Va11FF7yT+VJk3azKfS6AWN7zRjlKP7lU+aouD1NEEUAnad2+2k6Nfe29/8BRN24vjdWI9yHRfr7cSDq01ReNTL68m5GFkS7/gFt7E/lcNpLTneR8lD5POVRETpY9hbklNp80g9sMNm01A+tRbkEOAv8zClSod6v6kjeD01SonBU9dwBbNEVvks1oUNzdeAj8Eb5/YZyvdORmuvcpPYXbtnCpdeVxPAAAAAASUVORK5CYII=',
+  pawL: 'data:image/png;base64,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',
+  pawD: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADQAAAAfCAYAAACoE+4eAAAFeElEQVR42tWYT2gUZxjGf5EJfAMpzIKHjKSQgRQcacUVeohW3Kz0oFCh6R8wnuqfg00slEgLjdaI9aYeWnuoRIRC9NCaQqG5FHdXNBuwZVa0OAEDKxgyAQMzkMB8kIGvh9ndZHU3btuspi/MHna/mfme93mf5333gyaE2WEqoOqyNicV/6ewOi0lhFBoPAcGUGgo0SaU/VZzgbX8p7vjzQMgNIHZYWLbNsk3kyQSOhII/ZC5+Tmcew7FR0WCIKjcbhgGQRC0vFImzA4zZqEEZuTyiPKf+qrRCMNQOXcnVN+B3pjRZRZfbiTfTlZKp/94v/L9xkGsFjczN5XVZVWe/XLQlHTR+1GvChdC1Yx4eN9RVmcMrJS8poUSbUI5dx31MmLk8qWygfhNAWNttpvGSr2YfTKrnjWdtXA5BbQopV5N/4gkLa16CxqKqHE33rAuwQBoAqWUIqJFCFFsXO41wBiGgf/UWxedXS0p1dLa8u8YKo0sOJN50MT6GEE0CH2/3LP+eUL6j/Wr9RiO46j+Y/2qYVMQbUJJKVELIYja7EgpERprzl4QSLx5iRDxCLVSCDKKDUJGUHzi4c14uSN9e3peqCG5KBn8fLAuGIDR66Mc/uTwmldVKMEPQwih9FF77DJNDu7fkWrUttWsN4vZbtZcOPDZAJcunm+KttzpIAYU1bYqvVXHahcYhuDa1Sv4UuYGPh3oqcuQaBOKiLpgvDkPuSibZhR+GJbKeUW5RYCmk3gNDCP+XkroPXCQLfaWlB+GpxO6fqamy8lFidVp1X3hiS9OMPTVUOOamPcaX7soAZi8k6lmRoPCvTz+AhSfSB4WfZxHHs4jn8Gvz5PJOsMTrn+6rm1bVh1AEYz9MrYq4Oe1Ntbw2odFv/wHEfevQtVvmd/HSpqq1lWyO83o9WtAODzhzmZrApJS1nxhcaZIoi1RuwXXiEw2w453djS0tjAdxKUVQRjB+C/ViShOuc/f1KrHCegwAR3QUxPurJq4P5sC2GBvtlMArusui3LlSwsFRFvj2jl39hy29QI2IyhMBYQLceYl4D4oMPdMqbquswyifJUi/V4fMiwP5Dq06qcBNrhTbk60iZw355EpFCs1XTGEmZIhNBj5P/Kr9DEozgTk3YBwKaxifez6Fdo3mpWkfv/dhZoJrlh4IkEwH7AMkdSEOzusxfqxz7gPCqlzQwOc/XYUkJiGwDQEaAJv3iu5zosaZICUkuKMjxAJJBKiGEi49OxqPdaGBsHMHMVpl+5daSb/nGT06gUKk3nSe3urWKnqXYAoJU5fVlmu3IdSQBbgm4sj9Oz9YJn2Bw5HPt7DpWu/0ftumoQhECu6uC8lQSDxF0BGIXu2b2Lkx9+wtzWio3gbH+7fife4MlDngFvlidswErsTG42U/YaN1WVj2VuwOjoxNpoIIdB1Pb4n4tZ2OzFcaazpnnQ2k82kAA4fHeTQ8cE4O0uwc2sCs9Pi51+dF25w59ZNJLvTXPrhRkNgLpw9xdhPV7A327hTbt2pWghRNSHISJb1mKs5Kex7vy8VzM9l87czlT5gdyUxLYv87XHkouTw8SEOHT2x6jY/3L8d73GRG+MTtFtbYKk+oFODR8j8Po5oE8hFuSbHWbUeki2VYM3Y934fQ6fOg6bX0JDHyS+PUJjMI4Rg9Nc87a+vcLwSuMk745z8oh+5GKwss55mHjQOA6dXdm2hiapelXx7B9u3dRNGksfTLs4DB1k6RDQ7TLyZ2IKtLpvuXWlkBO69PK5bqLiX1WVTnHbX9KBxtYcNo7HSOnMl5navwmDOMIwz5utWSmhxD6tKzLIeclLKHtZTWF32cKk8yyef2VWTE18pNFLr+5ReI2V2Wutmk38DTgqJ5dcOC+8AAAAASUVORK5CYII=',
+  pawU: 'data:image/png;base64,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',
 };
 // PREVIEW-ASSETS END
 
@@ -1018,6 +1052,14 @@ function drawWidget(w, s, box) {
     case 'mc':
       box.style.background = 'url(' + PREVIEW_ART.cat + ') 0 0/200px 132px no-repeat';
       break;
+    case 'ct': { // same parts and offsets as the board (layout.cpp W_TCAT); the paw taps once a second here
+      box.style.background = 'url(' + PREVIEW_ART.cat + ') 20px 0/200px 132px no-repeat';
+      const up = s.s % 2 === 0;
+      for (const [src, cx, cy, W, H, show] of [['pawL', 76, 44, 68, 44, true], ['pawD', -69, 27, 52, 31, !up], ['pawU', -55, 4, 58, 50, up]]) {
+        if (show) img(PREVIEW_ART[src], 'position:absolute;left:' + (120 + cx - W / 2) + 'px;top:' + (66 + cy - H / 2) + 'px', box);
+      }
+      break;
+    }
     case 'sh':
       box.style.background = w.c || '#FBC979'; box.style.opacity = ((w.o === undefined ? 255 : w.o) / 255).toFixed(3);
       box.style.borderRadius = w.k === 1 ? '50%' : (w.r | 0) + 'px'; break;
@@ -1298,6 +1340,8 @@ $('bDelSaved').onclick = () => {
   delete list[n]; store('layouts', JSON.stringify(list)); renderSaved();
 };
 
+function layoutLevel(lay) { let n = 0; for (const p of lay.pg) for (const w of (p.w || [])) n = Math.max(n, WIDGET_LEVEL[w.t] || 0); for (const p of lay.pg) if (p.bg && p.bg.t === 'i') n = Math.max(n, 2); return n; }
+function newWidgetNames(lay, have) { const s = new Set(); for (const p of lay.pg) for (const w of (p.w || [])) if ((WIDGET_LEVEL[w.t] || 0) > have) s.add(WIDGET_DEFS[w.t] ? WIDGET_DEFS[w.t].name : w.t); return [...s].join(', ') || 'picture background'; }
 // ---- talking to the board: acks (0x10) arrive through feed() ----
 const ackQueue = [], ackWaiters = [];
 function onAck(a) {
@@ -1342,6 +1386,7 @@ function simHandle(u) {
   }
   if (id === 0x0E) { sim.open = false; sim.data = []; return mk(0); }
   if (id === 0x11) { sim.stored = null; sim.storedCrc = 0; return mk(0); }
+  if (id === 0x0F) return mk(0, 2); // feature level 2
   return mk(0);
 }
 const PKT_NAMES = { 0x0B: 'begin', 0x0C: 'chunk', 0x0D: 'end', 0x0E: 'abort', 0x0F: 'query', 0x11: 'reset' };
@@ -1359,12 +1404,20 @@ function boardIo() {
 }
 function ackText(a) {
   if (!a) return 'No answer from the board. Is it running firmware with the layout engine (PR #7 or later)?';
-  return [a.active ? 'custom layout active' : 'built-in screens', a.stored ? 'layout stored' : 'no layout stored', a.safeMode ? 'SAFE MODE (layout ignored)' : '', a.freeKb + ' KB free'].filter(Boolean).join(', ');
+  return [a.active ? 'custom layout active' : 'built-in screens', a.stored ? 'layout stored' : 'no layout stored', a.safeMode ? 'SAFE MODE (layout ignored)' : '', a.freeKb + ' KB free',
+    a.cmd === 0x0F ? 'firmware feature level ' + a.detail : ''].filter(Boolean).join(', ');
 }
 function boardReady() { if (!active) { flash('Connect to the board first, or press Dry run to try it without one.'); return false; } return true; }
 $('bSend').onclick = async () => {
   if (sending || !boardReady()) return;
   const o = ed.toJSON(); if (!o.ok) { flash('not valid: ' + o.err); return; }
+  const need = layoutLevel(ed.toLayout());
+  if (need > 0) { // ask the firmware what it can draw before sending widgets it does not know
+    const io = boardIo(); ackQueue.length = 0;
+    io.send(layoutQueryPacket()); const q = await io.ack(0x0F, 1500);
+    if (!q) { setSend(ackText(null), 'bad'); return; }
+    if (q.detail < need) { setSend('This layout uses widgets the board firmware does not have yet (' + newWidgetNames(ed.toLayout(), q.detail) + '). Flash the newer firmware first.', 'bad'); return; }
+  }
   sending = true; renderMeter(); $('bProg').hidden = false; $('bProg').value = 0;
   setSend('sending ' + o.size + ' bytes' + (dry ? ' to the simulated board' : '') + '...');
   ackQueue.length = 0;

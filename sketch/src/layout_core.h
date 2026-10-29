@@ -19,8 +19,27 @@ constexpr uint16_t CHUNK_BYTES = 192; // fixed chunk size: chunk n starts at byt
 constexpr uint16_t SCREEN_W = 240; // portrait: panel 240x320, rotation 0/2 (LGFX_CYD.h)
 constexpr uint16_t SCREEN_H = 320;
 
-enum WType : uint8_t { W_NONE = 0, W_ANALOG, W_DIGITAL, W_WEATHER, W_NOWPLAY, W_SYSBARS, W_TAPS, W_LABEL, W_MOOD, W_SHAPE, W_SLIDER, W_COUNT };
-enum BgType : uint8_t { BG_WEATHER = 0, BG_BUILTIN, BG_SOLID, BG_GRADIENT };
+enum WType : uint8_t {
+  W_NONE = 0, W_ANALOG, W_DIGITAL, W_WEATHER, W_NOWPLAY, W_SYSBARS, W_TAPS, W_LABEL, W_MOOD, W_SHAPE, W_SLIDER,
+  // feature level 2
+  W_TCAT, W_POMO, W_COUNTDOWN, W_STOPWATCH, W_DATE, W_FOCUS, W_BUTTON, W_SPOTIFY, W_ALBUM, W_REMIND, W_PICTURE,
+  W_COUNT
+};
+// What this firmware understands; reported in the QUERY ack's detail byte (older firmware answers 0).
+constexpr uint8_t FEATURE_LEVEL = 2;
+constexpr uint8_t PICTURE_SLOTS = 8;
+
+// Button widget actions ("e"). Arg ("g") only for the ones marked.
+enum BtnAction : uint8_t {
+  BA_NONE = 0, BA_PAW_TAP, BA_HAPPY, BA_SLEEPY, BA_TOGGLE_UNIT, BA_MUTE, BA_BRIGHTNESS_STEP, BA_WALLPAPER_NEXT,
+  BA_PAGE_NEXT, BA_PAGE_PREV, BA_POMO_TOGGLE, BA_POMO_RESET, BA_FOCUS_TOGGLE, BA_SW_TOGGLE, BA_SW_RESET,
+  BA_SP_PLAY, BA_SP_NEXT, BA_SP_PREV, // sent to the web page as event 0x13 (Spotify)
+  BA_HOST_EVENT, // sent to the host as event 0x13 with arg g
+  BA_BLE_KEY, // Bluetooth keyboard build only: g = (modifiers << 8) | HID usage
+  BA_BLE_MEDIA, // Bluetooth keyboard build only: g = media key id
+  BA_COUNT
+};
+enum BgType : uint8_t { BG_WEATHER = 0, BG_BUILTIN, BG_SOLID, BG_GRADIENT, BG_IMAGE };
 
 struct Widget {
   uint8_t type;
@@ -36,12 +55,17 @@ struct Widget {
   int16_t x, y, w, h;
   uint16_t toff; // text in Layout::text
   uint8_t tlen;
+  uint16_t p; // minutes: pomodoro work, reminder interval, countdown target (minutes after midnight)
+  uint8_t b; // pomodoro break minutes
+  uint8_t e; // button action (BtnAction)
+  uint16_t g; // button action argument
+  uint8_t i; // picture slot
 };
 
 struct Page {
   bool is_main; // the original built-in screen
   uint8_t bg_type;
-  uint8_t bg_idx; // built-in wallpaper 0..5
+  uint8_t bg_idx; // built-in wallpaper 0..5, or picture slot 0..7 for BG_IMAGE
   uint32_t c1, c2;
   uint8_t first, nw; // widgets are stored flat; this page owns widgets[first .. first+nw)
 };

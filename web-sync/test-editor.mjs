@@ -211,3 +211,13 @@ console.log('editor tests ok');
   assert.equal(ed.canUndo(), false); assert.equal(ed.canRedo(), false); assert.equal(ed.state.pages[0].w.length, 1, 'clearHistory keeps the content');
   console.log('editor history clear ok');
 }
+{
+  // the typing cat: fixed 240x132, placed full width, valid layout
+  const ed = createEditor(); const r = ed.addWidget(0, 'ct');
+  assert.equal(r.ok, true); const w = ed.find(r.id).w;
+  assert.deepEqual([w.x, w.w, w.h], [0, 240, 132]);
+  ed.setGeom(r.id, { x: 50, w: 100 }); assert.deepEqual([ed.find(r.id).w.x, ed.find(r.id).w.w], [0, 240], 'cannot move sideways or resize');
+  assert.equal(ed.toJSON().ok, true);
+  for (const k of ['pawL', 'pawD', 'pawU']) assert.match(lib.PREVIEW_ART[k], /^data:image\/png;base64,/);
+  console.log('typing cat ok');
+}

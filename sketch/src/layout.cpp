@@ -2,6 +2,7 @@
 #include "layout.h"
 #include "accessory.h"
 #include "animation.h"
+#include "keymap.h"
 #include "layout_core.h"
 #include "ui/ui.h"
 #include <LittleFS.h>
@@ -51,7 +52,34 @@ static struct {
   uint32_t taps = 0;
   uint8_t mood = 0;
   uint8_t wall = 0;
+  bool have_date = false;
+  uint16_t year = 0;
+  uint8_t mon = 0, day = 0, wday = 0;
 } D;
+
+// ---- feature level 2 state (kept across page changes; RAM only) ----
+static struct { bool running = false, on_break = false; uint32_t end_ms = 0, left_ms = 0, total_ms = 0; } POMO;
+static struct { bool running = false; uint32_t start_ms = 0, acc_ms = 0; } SW;
+static bool focus_busy = false;
+static uint32_t remind_next[lc::MAX_WIDGETS_TOTAL]; // millis() when each reminder widget fires next
+static uint32_t remind_shown[lc::MAX_WIDGETS_TOTAL]; // millis() it fired, shown as "now" for a minute
+static struct { uint8_t e; uint16_t g; } pend[6]; // button actions, run from the main loop (layout_poll), not inside LVGL
+static uint8_t pend_n = 0;
+
+// main.cpp
+void ui_toast(const char *text, uint32_t ms);
+void board_key_action(uint8_t key_action);
+void host_send_event(uint8_t action, uint16_t arg);
+void status_led_update();
+bool ble_keys_send(uint8_t mods, uint8_t key); // false = not in this build / not paired
+bool ble_media_send(uint16_t id);
+static void goto_page(uint8_t idx, lv_scr_load_anim_t anim);
+
+static const char *const REMIND_TEXT[3] = {"Drink some water", "Stand up and stretch", "Breathe: 4 in, 4 out"};
+static const char *const REMIND_SHORT[3] = {"Water", "Stretch", "Breathe"};
+static const char *const WDAY[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+static const char *const MON3[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+static const char *const MONTH[12] = {"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"};
 
 struct RT { // per widget runtime objects of the page on screen
   lv_obj_t *a, *b, *c;
@@ -147,6 +175,7 @@ static lc::Err load_file(lc::Layout &out) {
 // Building a page
 // ------------------------------------------------------------------------------------------------
 static void gesture_cb(lv_event_t *e);
+static void widget_cb(lv_event_t *ev);
 
 static const lv_font_t *font_for(uint8_t z) { return z ? &lv_font_montserrat_20 : &lv_font_montserrat_14; }
 static lv_text_align_t align_for(uint8_t a) { return a == 1 ? LV_TEXT_ALIGN_CENTER : (a == 2 ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT); }
@@ -331,6 +360,118 @@ static void build_widget(lv_obj_t *p, const Widget &w, RT &r) {
       lv_obj_add_flag(r.b, LV_OBJ_FLAG_HIDDEN);
       break;
     }
+    case lc::W_POMO: { // ring + time + phase; tap = start/pause, long press = reset
+      lv_obj_t *o = mkbox(p, w);
+      int d = w.w < w.h ? w.w : w.h;
+      lv_obj_t *arc = lv_arc_create(o);
+      lv_obj_set_size(arc, d, d);
+      lv_obj_center(arc);
+      lv_arc_set_rotation(arc, 270);
+      lv_arc_set_bg_angles(arc, 0, 360);
+      lv_arc_set_range(arc, 0, 1000);
+      lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
+      lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+      int aw = d / 12 < 4 ? 4 : d / 12;
+      lv_obj_set_style_arc_width(arc, aw, LV_PART_MAIN);
+      lv_obj_set_style_arc_width(arc, aw, LV_PART_INDICATOR);
+      lv_obj_set_style_arc_color(arc, lv_color_hex(0x303030), LV_PART_MAIN);
+      lv_obj_set_style_arc_color(arc, lv_color_hex(color_of(w, ACCENT)), LV_PART_INDICATOR);
+      r.a = arc;
+      r.b = mklabel(o, d >= 100 ? &lv_font_montserrat_20 : &lv_font_montserrat_14, 0xFFFFFF);
+      lv_obj_align(r.b, LV_ALIGN_CENTER, 0, -6);
+      r.c = mklabel(o, &lv_font_montserrat_14, 0xA99BB3);
+      lv_obj_align(r.c, LV_ALIGN_CENTER, 0, d >= 100 ? 16 : 10);
+      break;
+    }
+    case lc::W_COUNTDOWN: case lc::W_STOPWATCH: case lc::W_DATE: {
+      lv_obj_t *o = mkbox(p, w);
+      if (w.type != lc::W_DATE) panel_style(o);
+      lv_obj_t *l = mklabel(o, font_for(w.z), color_of(w, 0xFFFFFF));
+      lv_obj_set_width(l, lv_pct(100));
+      lv_obj_set_style_text_align(l, w.type == lc::W_DATE ? align_for(w.a) : LV_TEXT_ALIGN_CENTER, 0);
+      lv_label_set_long_mode(l, LV_LABEL_LONG_CLIP);
+      lv_obj_align(l, LV_ALIGN_CENTER, 0, 0);
+      r.a = l;
+      if (w.type == lc::W_COUNTDOWN && w.tlen) { // caption on top, time below
+        r.b = mklabel(o, &lv_font_montserrat_14, 0xA99BB3);
+        lv_obj_set_width(r.b, lv_pct(100));
+        lv_obj_set_style_text_align(r.b, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(r.b, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(r.b, L.text + w.toff);
+        lv_obj_align(r.b, LV_ALIGN_TOP_MID, 0, 4);
+        lv_obj_align(l, LV_ALIGN_BOTTOM_MID, 0, -4);
+      }
+      break;
+    }
+    case lc::W_FOCUS: case lc::W_REMIND: {
+      lv_obj_t *o = mkbox(p, w);
+      lv_obj_set_style_radius(o, 10, 0);
+      lv_obj_set_style_bg_opa(o, w.type == lc::W_FOCUS ? LV_OPA_COVER : 80, 0);
+      lv_obj_set_style_bg_color(o, lv_color_black(), 0);
+      lv_obj_t *l = mklabel(o, w.type == lc::W_FOCUS && w.h >= 40 ? &lv_font_montserrat_20 : font_for(w.z), 0xFFFFFF);
+      lv_obj_set_width(l, lv_pct(100));
+      lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+      lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+      lv_obj_center(l);
+      r.a = o;
+      r.b = l;
+      break;
+    }
+    case lc::W_BUTTON: {
+      lv_obj_t *bt = lv_btn_create(p);
+      lv_obj_set_pos(bt, w.x, w.y);
+      lv_obj_set_size(bt, w.w, w.h);
+      lv_obj_set_style_bg_color(bt, lv_color_hex(color_of(w, ACCENT)), 0);
+      lv_obj_set_style_radius(bt, w.r ? w.r : 8, 0);
+      lv_obj_t *l = mklabel(bt, font_for(w.z), 0x000000);
+      lv_label_set_text(l, w.tlen ? L.text + w.toff : "");
+      lv_label_set_long_mode(l, LV_LABEL_LONG_CLIP);
+      lv_obj_set_style_max_width(l, w.w - 8, 0);
+      lv_obj_center(l);
+      r.a = bt;
+      break;
+    }
+    case lc::W_SPOTIFY: { // three buttons: previous, play/pause, next (run by the web page)
+      lv_obj_t *o = mkbox(p, w);
+      static const char *sym[3] = {LV_SYMBOL_PREV, LV_SYMBOL_PLAY, LV_SYMBOL_NEXT};
+      int gap = 6, bw = (w.w - 2 * gap) / 3;
+      for (int k = 0; k < 3; k++) {
+        lv_obj_t *bt = lv_btn_create(o);
+        lv_obj_set_pos(bt, k * (bw + gap), 0);
+        lv_obj_set_size(bt, bw, w.h);
+        lv_obj_set_style_bg_color(bt, lv_color_hex(color_of(w, ACCENT)), 0);
+        lv_obj_set_style_radius(bt, 8, 0);
+        lv_obj_t *l = mklabel(bt, &lv_font_montserrat_20, 0x000000);
+        lv_label_set_text(l, sym[k]);
+        lv_obj_center(l);
+        lv_obj_set_user_data(bt, (void *)(uintptr_t)(k == 0 ? lc::BA_SP_PREV : k == 1 ? lc::BA_SP_PLAY : lc::BA_SP_NEXT));
+      }
+      r.a = o;
+      break;
+    }
+    case lc::W_TCAT: { // the original screen's typing cat, same parts and offsets; layout_sync_cat() mirrors their state
+      lv_obj_t *o = lv_obj_create(p);
+      lv_obj_remove_style_all(o);
+      lv_obj_set_pos(o, w.x, w.y);
+      lv_obj_set_size(o, 240, 132);
+      lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_set_style_bg_img_src(o, &ui_img_main_png, 0);
+      struct Part {
+        const lv_img_dsc_t *img;
+        int16_t x, y;
+        bool hidden;
+      };
+      static const Part parts[5] = {{&ui_img_leftmousepaw_png, 76, 44, false}, {&ui_img_rightpawdown_png, -69, 27, false},
+                                    {&ui_img_rightpawup_png, -55, 4, true}, {&ui_img_sleepy_png, 10, -1, true}, {&ui_img_closeeye_png, 11, -11, true}};
+      for (const Part &pt : parts) {
+        lv_obj_t *im = lv_img_create(o);
+        lv_img_set_src(im, pt.img);
+        lv_obj_align(im, LV_ALIGN_CENTER, pt.x, pt.y);
+        if (pt.hidden) lv_obj_add_flag(im, LV_OBJ_FLAG_HIDDEN);
+      }
+      r.a = o;
+      break;
+    }
     case lc::W_SHAPE: {
       lv_obj_t *o = mkbox(p, w);
       lv_obj_set_style_bg_color(o, lv_color_hex(color_of(w, ACCENT)), 0);
@@ -419,7 +560,25 @@ static lv_obj_t *prepare_page(uint8_t idx) {
   scr_next ^= 1;
   apply_bg(s, pg);
   memset(rt, 0, sizeof rt);
-  for (uint8_t i = 0; i < pg.nw && i < lc::MAX_WIDGETS_PAGE; i++) build_widget(s, L.widgets[pg.first + i], rt[i]);
+  for (uint8_t i = 0; i < pg.nw && i < lc::MAX_WIDGETS_PAGE; i++) {
+    uint32_t before = lv_obj_get_child_cnt(s);
+    const Widget &w = L.widgets[pg.first + i];
+    build_widget(s, w, rt[i]);
+    lv_obj_t *root = lv_obj_get_child_cnt(s) > before ? lv_obj_get_child(s, before) : NULL;
+    if (!root) continue;
+    void *ud = (void *)(uintptr_t)i;
+    switch (w.type) { // tappable widgets
+      case lc::W_BUTTON: case lc::W_POMO: case lc::W_STOPWATCH: case lc::W_FOCUS: case lc::W_REMIND:
+        lv_obj_add_flag(root, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(root, widget_cb, LV_EVENT_SHORT_CLICKED, ud);
+        lv_obj_add_event_cb(root, widget_cb, LV_EVENT_LONG_PRESSED, ud);
+        break;
+      case lc::W_SPOTIFY:
+        for (uint32_t k = 0; k < lv_obj_get_child_cnt(root); k++) lv_obj_add_event_cb(lv_obj_get_child(root, k), widget_cb, LV_EVENT_SHORT_CLICKED, ud);
+        break;
+      default: break;
+    }
+  }
   if (L.npages > 1) make_dots(s, idx);
   return s;
 }
@@ -509,12 +668,216 @@ static void update_widgets() {
           if (lv_slider_get_value(r.a) != v) lv_slider_set_value(r.a, v, LV_ANIM_OFF);
         }
         break;
+      case lc::W_POMO:
+        if (r.a && r.b && r.c) {
+          uint32_t left = POMO.running ? (int32_t)(POMO.end_ms - millis()) > 0 ? POMO.end_ms - millis() : 0 : POMO.left_ms;
+          uint32_t total = POMO.total_ms ? POMO.total_ms : (uint32_t)w.p * 60000UL;
+          if (!POMO.running && !POMO.left_ms) left = total = (uint32_t)w.p * 60000UL; // idle: shows the work length
+          uint32_t sec = (left + 999) / 1000;
+          snprintf(buf, sizeof buf, "%02lu:%02lu", (unsigned long)(sec / 60), (unsigned long)(sec % 60));
+          if (strcmp(lv_label_get_text(r.b), buf)) lv_label_set_text(r.b, buf);
+          lv_arc_set_value(r.a, total ? (int16_t)(1000UL * (total - left) / total) : 0);
+          const char *ph = !POMO.running && !POMO.left_ms ? "tap to start" : POMO.on_break ? (POMO.running ? "break" : "break, paused") : (POMO.running ? "focus" : "paused");
+          if (strcmp(lv_label_get_text(r.c), ph)) lv_label_set_text(r.c, ph);
+          lv_obj_set_style_arc_color(r.a, lv_color_hex(POMO.on_break ? 0xA5DBAF : color_of(w, ACCENT)), LV_PART_INDICATOR);
+        }
+        break;
+      case lc::W_COUNTDOWN:
+        if (changed && r.a) {
+          if (!D.have_time) { lv_label_set_text(r.a, "--:--:--"); break; }
+          int32_t now = D.h * 3600 + D.m * 60 + D.s, target = (int32_t)w.p * 60;
+          int32_t left = target - now;
+          if (left < 0) left += 86400; // the next time it comes round
+          if (left == 0 || left > 86340) snprintf(buf, sizeof buf, "now!");
+          else snprintf(buf, sizeof buf, "%ld:%02ld:%02ld", (long)(left / 3600), (long)(left / 60 % 60), (long)(left % 60));
+          lv_label_set_text(r.a, buf);
+        }
+        break;
+      case lc::W_STOPWATCH:
+        if (r.a) {
+          uint32_t ms = SW.acc_ms + (SW.running ? millis() - SW.start_ms : 0);
+          snprintf(buf, sizeof buf, "%02lu:%02lu.%lu", (unsigned long)(ms / 60000 % 100), (unsigned long)(ms / 1000 % 60), (unsigned long)(ms / 100 % 10));
+          if (strcmp(lv_label_get_text(r.a), buf)) lv_label_set_text(r.a, buf);
+        }
+        break;
+      case lc::W_DATE:
+        if (changed && r.a) {
+          if (!D.have_date) { lv_label_set_text(r.a, "---"); break; }
+          uint8_t mi = D.mon >= 1 && D.mon <= 12 ? D.mon - 1 : 0;
+          if (w.k == 1) snprintf(buf, sizeof buf, "%04u-%02u-%02u", D.year, D.mon, D.day);
+          else if (w.k == 2) snprintf(buf, sizeof buf, "%s %u", MONTH[mi], D.day);
+          else snprintf(buf, sizeof buf, "%s %u %s", WDAY[D.wday % 7], D.day, MON3[mi]);
+          lv_label_set_text(r.a, buf);
+        }
+        break;
+      case lc::W_FOCUS:
+        if (r.a && r.b) {
+          const char *t = focus_busy ? (w.tlen ? L.text + w.toff : "Focus") : "Available";
+          if (strcmp(lv_label_get_text(r.b), t)) {
+            lv_label_set_text(r.b, t);
+            lv_obj_set_style_bg_color(r.a, lv_color_hex(focus_busy ? 0xB3261E : 0x2E7D32), 0);
+          }
+        }
+        break;
+      case lc::W_REMIND:
+        if (r.b) {
+          uint8_t idx = pg.first + i, kind = w.k < 3 ? w.k : 0;
+          if (remind_shown[idx] && millis() - remind_shown[idx] < 60000UL) snprintf(buf, sizeof buf, "%s: now!", REMIND_SHORT[kind]);
+          else {
+            uint32_t left = (int32_t)(remind_next[idx] - millis()) > 0 ? remind_next[idx] - millis() : 0;
+            snprintf(buf, sizeof buf, "%s in %lu min", REMIND_SHORT[kind], (unsigned long)((left + 59999) / 60000));
+          }
+          if (strcmp(lv_label_get_text(r.b), buf)) lv_label_set_text(r.b, buf);
+        }
+        break;
       default: break;
     }
   }
 }
 
+// ---- pomodoro / reminders run whether or not their page is on screen ----
+static void pomo_start(uint16_t work, uint8_t brk) {
+  if (POMO.running) { // pause
+    POMO.left_ms = (int32_t)(POMO.end_ms - millis()) > 0 ? POMO.end_ms - millis() : 0;
+    POMO.running = false;
+    return;
+  }
+  if (!POMO.left_ms) { // fresh start of a work period
+    POMO.on_break = false;
+    POMO.total_ms = (uint32_t)work * 60000UL;
+    POMO.left_ms = POMO.total_ms;
+  }
+  (void)brk;
+  POMO.end_ms = millis() + POMO.left_ms;
+  POMO.running = true;
+}
+static void pomo_reset() { POMO.running = false; POMO.on_break = false; POMO.left_ms = 0; POMO.total_ms = 0; }
+static const Widget *first_of(uint8_t type) {
+  for (uint8_t i = 0; i < L.nwidgets; i++) if (L.widgets[i].type == type) return &L.widgets[i];
+  return NULL;
+}
+static void timers_cb(lv_timer_t *) {
+  if (!active) return;
+  uint32_t now = millis();
+  if (POMO.running && (int32_t)(now - POMO.end_ms) >= 0) {
+    const Widget *pw = first_of(lc::W_POMO);
+    beepbeep();
+    if (!POMO.on_break && pw) { // work done: the break starts by itself
+      POMO.on_break = true;
+      POMO.total_ms = (uint32_t)pw->b * 60000UL;
+      POMO.end_ms = now + POMO.total_ms;
+      set_mood(MOOD_HAPPY);
+      ui_toast("Break time!", 4000);
+    } else { // break done: wait for the next tap
+      pomo_reset();
+      ui_toast("Break over: tap to focus again", 4000);
+    }
+  }
+  for (uint8_t i = 0; i < L.nwidgets; i++) {
+    const Widget &w = L.widgets[i];
+    if (w.type != lc::W_REMIND || (int32_t)(now - remind_next[i]) < 0) continue;
+    remind_next[i] = now + (uint32_t)w.p * 60000UL;
+    remind_shown[i] = now;
+    ui_toast(REMIND_TEXT[w.k < 3 ? w.k : 0], 6000);
+    set_mood(MOOD_HAPPY);
+    beepbeep();
+  }
+}
+
+// ---- taps on widgets ----
+static void queue_action(uint8_t e, uint16_t g) {
+  if (pend_n < sizeof pend / sizeof pend[0]) pend[pend_n++] = {e, g};
+}
+static void widget_cb(lv_event_t *ev) {
+  if (!active || L.pages[cur].is_main) return;
+  lv_event_code_t code = lv_event_get_code(ev);
+  uint8_t i = (uint8_t)(uintptr_t)lv_event_get_user_data(ev);
+  const lc::Page &pg = L.pages[cur];
+  if (i >= pg.nw) return;
+  const Widget &w = L.widgets[pg.first + i];
+  bool tap = (code == LV_EVENT_SHORT_CLICKED), hold = (code == LV_EVENT_LONG_PRESSED);
+  switch (w.type) {
+    case lc::W_BUTTON: if (tap) queue_action(w.e, w.g); break;
+    case lc::W_SPOTIFY: if (tap) queue_action((uint8_t)(uintptr_t)lv_obj_get_user_data(lv_event_get_target(ev)), 0); break;
+    case lc::W_POMO: if (tap) queue_action(lc::BA_POMO_TOGGLE, 0); else if (hold) queue_action(lc::BA_POMO_RESET, 0); break;
+    case lc::W_STOPWATCH: if (tap) queue_action(lc::BA_SW_TOGGLE, 0); else if (hold) queue_action(lc::BA_SW_RESET, 0); break;
+    case lc::W_FOCUS: if (tap) queue_action(lc::BA_FOCUS_TOGGLE, 0); break;
+    case lc::W_REMIND: if (tap) { uint8_t idx = pg.first + i; remind_next[idx] = millis() + (uint32_t)w.p * 60000UL; remind_shown[idx] = 0; clickSound(); } break;
+    default: break;
+  }
+}
+
+static void run_action(uint8_t e, uint16_t g) {
+  switch (e) {
+    case lc::BA_PAW_TAP: board_key_action(ACT_PAW_TAP); break;
+    case lc::BA_HAPPY: board_key_action(ACT_HAPPY); break;
+    case lc::BA_SLEEPY: board_key_action(ACT_SLEEPY); break;
+    case lc::BA_TOGGLE_UNIT: board_key_action(ACT_TOGGLE_UNIT); break;
+    case lc::BA_MUTE: board_key_action(ACT_MUTE); break;
+    case lc::BA_BRIGHTNESS_STEP: board_key_action(ACT_BRIGHTNESS_STEP); break;
+    case lc::BA_WALLPAPER_NEXT: board_key_action(ACT_WALLPAPER_NEXT); break;
+    case lc::BA_PAGE_NEXT: if (L.npages > 1) goto_page((cur + 1) % L.npages, LV_SCR_LOAD_ANIM_MOVE_LEFT); break;
+    case lc::BA_PAGE_PREV: if (L.npages > 1) goto_page((cur + L.npages - 1) % L.npages, LV_SCR_LOAD_ANIM_MOVE_RIGHT); break;
+    case lc::BA_POMO_TOGGLE: {
+      const Widget *pw = first_of(lc::W_POMO);
+      pomo_start(pw ? pw->p : 25, pw ? pw->b : 5);
+      clickSound();
+      break;
+    }
+    case lc::BA_POMO_RESET: pomo_reset(); offSound(); break;
+    case lc::BA_FOCUS_TOGGLE: focus_busy = !focus_busy; status_led_update(); clickSound(); break;
+    case lc::BA_SW_TOGGLE:
+      if (SW.running) { SW.acc_ms += millis() - SW.start_ms; SW.running = false; }
+      else { SW.start_ms = millis(); SW.running = true; }
+      clickSound();
+      break;
+    case lc::BA_SW_RESET: SW.running = false; SW.acc_ms = 0; offSound(); break;
+    case lc::BA_SP_PLAY: case lc::BA_SP_NEXT: case lc::BA_SP_PREV: case lc::BA_HOST_EVENT:
+      host_send_event(e, g);
+      clickSound();
+      break;
+    case lc::BA_BLE_KEY:
+      if (!ble_keys_send((uint8_t)(g >> 8), (uint8_t)(g & 0xFF))) ui_toast("Bluetooth keys: not paired, or not in this firmware", 2500);
+      else board_key_action(ACT_PAW_TAP); // the cat types what you send
+      break;
+    case lc::BA_BLE_MEDIA:
+      if (!ble_media_send(g)) ui_toast("Bluetooth keys: not paired, or not in this firmware", 2500);
+      else clickSound();
+      break;
+    default: break;
+  }
+  D.ver++; // redraw what the action changed
+}
+
 static void tick_cb(lv_timer_t *) { update_widgets(); }
+
+// Typing cat widgets copy the state of the original screen's cat (which main.cpp and animation.cpp keep animating
+// whether or not that screen is shown): paw up/down, eyes shut, asleep, mouse paw position.
+static inline void copy_hidden(lv_obj_t *dst, lv_obj_t *src) {
+  bool h = lv_obj_has_flag(src, LV_OBJ_FLAG_HIDDEN);
+  if (h != lv_obj_has_flag(dst, LV_OBJ_FLAG_HIDDEN)) {
+    if (h) lv_obj_add_flag(dst, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_clear_flag(dst, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+void layout_sync_cat() {
+  if (!active || L.pages[cur].is_main) return;
+  lv_obj_t *act = lv_scr_act();
+  if (act != scr_c[0] && act != scr_c[1]) return;
+  const lc::Page &pg = L.pages[cur];
+  for (uint8_t i = 0; i < pg.nw && i < lc::MAX_WIDGETS_PAGE; i++) {
+    if (L.widgets[pg.first + i].type != lc::W_TCAT || !rt[i].a) continue;
+    lv_obj_t *o = rt[i].a;
+    lv_obj_t *mouse = lv_obj_get_child(o, 0);
+    lv_coord_t mx = lv_obj_get_x_aligned(ui_main_Image_leftpaw);
+    if (lv_obj_get_x_aligned(mouse) != mx) lv_obj_set_x(mouse, mx);
+    copy_hidden(lv_obj_get_child(o, 1), ui_main_Image_rightpawdown);
+    copy_hidden(lv_obj_get_child(o, 2), ui_main_Image_rightpawup);
+    copy_hidden(lv_obj_get_child(o, 3), ui_main_Image_sleepy);
+    copy_hidden(lv_obj_get_child(o, 4), ui_main_Image_eyelid);
+  }
+}
+static void cat_cb(lv_timer_t *) { layout_sync_cat(); }
 
 void layout_feed_time(uint8_t h, uint8_t m, uint8_t s) {
   D.have_time = true;
@@ -554,6 +917,18 @@ void layout_feed_taps(uint32_t count) {
   D.ver++;
 }
 void layout_feed_mood(uint8_t mood) { D.mood = mood; }
+void layout_feed_date(uint16_t year, uint8_t mon, uint8_t day, uint8_t wday) {
+  D.have_date = true;
+  D.year = year;
+  D.mon = mon;
+  D.day = day;
+  D.wday = wday;
+  D.ver++;
+}
+int8_t layout_focus_led() { // -1: no focus sign in the active layout, else 1 busy / 0 available
+  if (!active || !first_of(lc::W_FOCUS)) return -1;
+  return focus_busy ? 1 : 0;
+}
 void layout_on_wallpaper(uint8_t idx) {
   if (idx > 5) return;
   D.wall = idx;
@@ -645,7 +1020,13 @@ static void activate() {
     lv_obj_add_event_cb(ui_Screen_main, main_loaded_cb, LV_EVENT_SCREEN_LOADED, NULL);
     handlers_on = true;
     lv_timer_create(tick_cb, 250, NULL);
+    lv_timer_create(cat_cb, 30, NULL); // blink (200 ms) and mouse paw need a quicker copy than the other widgets
     lv_timer_create(rotate_cb, 1000, NULL);
+    lv_timer_create(timers_cb, 250, NULL); // pomodoro and reminders keep running on any page
+  }
+  for (uint8_t i = 0; i < L.nwidgets; i++) { // reminders count from now
+    remind_next[i] = millis() + (uint32_t)L.widgets[i].p * 60000UL;
+    remind_shown[i] = 0;
   }
   active = true;
   cur = 0;
@@ -657,6 +1038,7 @@ static void activate() {
   if (L.npages > 1) dots_main = make_dots(ui_Screen_main, cur);
   safe_reason = 0;
   set_status();
+  status_led_update(); // a focus sign takes over the LED
 }
 
 static void deactivate() {
@@ -776,6 +1158,13 @@ void layout_packet(const uint8_t *pkt, uint8_t len) {
 }
 
 void layout_poll() {
+  if (pend_n) { // button actions, run here so they never run inside an LVGL event (paw taps redraw, pages change)
+    uint8_t n = pend_n;
+    decltype(pend) todo;
+    memcpy(todo, pend, sizeof pend);
+    pend_n = 0;
+    for (uint8_t i = 0; i < n; i++) run_action(todo[i].e, todo[i].g);
+  }
   if (!session.take_changed()) return;
   if (!file_exists()) {
     safe_reason = 0;

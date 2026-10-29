@@ -2,6 +2,8 @@
 #include "accessory.h"
 #include <lvgl.h>
 
+void status_led_update(); // main.cpp
+
 uint8_t idle_mode = IDLE_NEVER;
 uint8_t idle_minutes = 5;
 
@@ -42,11 +44,8 @@ static void to_active(bool host_connected) {
   tft.setBrightness(dim ? dim_brightness : brightness); // dim = light-sensor dimming, unrelated to idle
   if (was_asleep) {
     lv_obj_invalidate(lv_scr_act());
-    if (host_connected) {
-      led_color(1, 0, 1); // green: host connected
-    } else {
-      led_color(0, 1, 1); // red: no host
-    }
+    state = POWER_ACTIVE;
+    status_led_update(); // green host / red none, or the focus sign's colour (main.cpp)
   }
   state = POWER_ACTIVE;
 }

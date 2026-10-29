@@ -184,7 +184,7 @@ Err int_in(P &p, int32_t lo, int32_t hi, int32_t &v) {
 }
 
 WType wtype_from(const char *s, size_t l) {
-  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl"};
+  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl", "ct", "pm", "cd", "sw", "dt", "fs", "bt", "sp", "aa", "rm", "pc"};
   for (uint8_t i = 1; i < W_COUNT; i++)
     if (key_is(s, l, names[i])) return (WType)i;
   return W_NONE;
@@ -196,7 +196,7 @@ Err parse_widget(P &p, Layout &L) {
   Widget w;
   memset(&w, 0, sizeof w);
   w.opa = 255;
-  bool hx = false, hy = false, hw = false, hh = false;
+  bool hx = false, hy = false, hw = false, hh = false, hp = false, he = false, hi = false;
   char text[MAX_TEXT_LEN + 1];
   size_t tl = 0;
   bool has_text = false;
@@ -227,6 +227,11 @@ Err parse_widget(P &p, Layout &L) {
       else if (key_is(key, kl, "f")) { e = int_in(p, 0, 1, v); w.f24 = v != 0; }
       else if (key_is(key, kl, "q")) { e = int_in(p, 0, 1, v); w.secs = v != 0; }
       else if (key_is(key, kl, "c")) { e = read_color(p, w.c); w.has_c = true; }
+      else if (key_is(key, kl, "p")) { e = int_in(p, 0, 1439, v); w.p = (uint16_t)v; hp = true; }
+      else if (key_is(key, kl, "b")) { e = int_in(p, 1, 60, v); w.b = (uint8_t)v; }
+      else if (key_is(key, kl, "e")) { e = int_in(p, 0, 63, v); w.e = (uint8_t)v; he = true; }
+      else if (key_is(key, kl, "g")) { e = int_in(p, 0, 65535, v); w.g = (uint16_t)v; }
+      else if (key_is(key, kl, "i")) { e = int_in(p, 0, PICTURE_SLOTS - 1, v); w.i = (uint8_t)v; hi = true; }
       else if (key_is(key, kl, "s")) {
         e = read_str(p, text, sizeof text, tl);
         if (!e && tl > MAX_TEXT_LEN) e = E_TEXT;
@@ -241,9 +246,30 @@ Err parse_widget(P &p, Layout &L) {
   if (w.type == W_NONE) return E_WIDGET_TYPE;
   if (!(hx && hy && hw && hh)) return E_GEOMETRY;
   if (w.x < 0 || w.y < 0 || w.w < 1 || w.h < 1 || w.x + w.w > SCREEN_W || w.y + w.h > SCREEN_H) return E_GEOMETRY;
-  if ((w.type == W_SLIDER && w.k > 1) || (w.type == W_SHAPE && w.k > 1)) return E_RANGE; // wx uses k 0..2
-  if (w.type == W_LABEL) {
-    if (!has_text || tl == 0) return E_TEXT;
+  if ((w.type == W_SLIDER && w.k > 1) || (w.type == W_SHAPE && w.k > 1)) return E_RANGE; // wx, dt, rm use k 0..2
+  switch (w.type) { // per-type rules for the feature level 2 widgets
+    case W_TCAT: if (w.w != 240 || w.h != 132) return E_GEOMETRY; break; // drawn at its fixed size
+    case W_ALBUM: if (w.w != 96 || w.h != 96) return E_GEOMETRY; break;
+    case W_POMO:
+      if (!hp) w.p = 25;
+      if (!w.b) w.b = 5;
+      if (w.p < 1 || w.p > 180) return E_RANGE;
+      break;
+    case W_COUNTDOWN: if (!hp) return E_RANGE; break;
+    case W_REMIND:
+      if (!hp) w.p = 30;
+      if (w.p < 5 || w.p > 240) return E_RANGE;
+      break;
+    case W_BUTTON:
+      if (!he || w.e >= BA_COUNT) return E_RANGE;
+      if (!has_text || tl == 0) return E_TEXT;
+      break;
+    case W_PICTURE: if (!hi) return E_RANGE; break;
+    default: break;
+  }
+  bool keeps_text = (w.type == W_LABEL || w.type == W_BUTTON || w.type == W_FOCUS || w.type == W_COUNTDOWN);
+  if (w.type == W_LABEL && (!has_text || tl == 0)) return E_TEXT;
+  if (keeps_text && has_text && tl > 0) {
     if (L.text_used + tl + 1 > MAX_TEXT_POOL) return E_TEXT_POOL;
     memcpy(L.text + L.text_used, text, tl);
     L.text[L.text_used + tl] = '\0';
@@ -272,9 +298,9 @@ Err parse_bg(P &p, Page &pg) {
         size_t l;
         e = read_str(p, tb, sizeof tb, l);
         if (e) return e;
-        if (l != 1 || (tb[0] != 'w' && tb[0] != 'b' && tb[0] != 's' && tb[0] != 'g')) return E_PAGE;
+        if (l != 1 || (tb[0] != 'w' && tb[0] != 'b' && tb[0] != 's' && tb[0] != 'g' && tb[0] != 'i')) return E_PAGE;
         t = tb[0];
-      } else if (key_is(key, kl, "i")) { e = int_in(p, 0, 5, v); idx = v; }
+      } else if (key_is(key, kl, "i")) { e = int_in(p, 0, PICTURE_SLOTS - 1, v); idx = v; }
       else if (key_is(key, kl, "c")) { e = read_color(p, pg.c1); hc = true; }
       else if (key_is(key, kl, "d")) { e = read_color(p, pg.c2); hd = true; }
       else e = skip(p, 4);
@@ -287,7 +313,7 @@ Err parse_bg(P &p, Page &pg) {
   switch (t) {
     case 'w': pg.bg_type = BG_WEATHER; break;
     case 'b':
-      if (idx < 0) return E_RANGE;
+      if (idx < 0 || idx > 5) return E_RANGE;
       pg.bg_type = BG_BUILTIN;
       pg.bg_idx = (uint8_t)idx;
       break;
@@ -298,6 +324,11 @@ Err parse_bg(P &p, Page &pg) {
     case 'g':
       if (!hc || !hd) return E_COLOR;
       pg.bg_type = BG_GRADIENT;
+      break;
+    case 'i':
+      if (idx < 0) return E_RANGE;
+      pg.bg_type = BG_IMAGE;
+      pg.bg_idx = (uint8_t)idx;
       break;
   }
   return E_OK;
@@ -458,7 +489,7 @@ Ack Session::handle(uint8_t id, const uint8_t *p, uint8_t n) {
     case PKT_CHUNK: return do_chunk(p, n);
     case PKT_END: return n == 0 ? do_end() : make(id, ST_BAD_PKT);
     case PKT_ABORT: return n == 0 ? do_abort() : make(id, ST_BAD_PKT);
-    case PKT_QUERY: return make(id, ST_OK);
+    case PKT_QUERY: return make(id, ST_OK, FEATURE_LEVEL); // detail = feature level
     case PKT_RESET:
       if (n != 0) return make(id, ST_BAD_PKT);
       drop();

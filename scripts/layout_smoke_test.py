@@ -166,6 +166,25 @@ def main():
     q = b.query()
     check("board alive after cycling pages", q is not None and (q.flags & 1), q)
 
+    # 12 typing cat (feature level 2): shown on a custom page while the "desktop app" types (status packets, keyDown bit)
+    q = b.query()
+    check("firmware reports feature level 2", q is not None and q.detail >= 2, q and q.detail)
+    cat = b'{"v":1,"pg":[{"bg":{"t":"b","i":0},"w":[{"t":"dc","x":20,"y":20,"w":200,"h":40,"f":1,"z":1,"a":1},{"t":"ct","x":0,"y":180,"w":240,"h":132}]}]}'
+    ok, msg = full(b, cat)
+    check("layout with a typing cat uploads", ok, msg)
+    t_end = time.time() + 4.0
+    n_taps = 0
+    while time.time() < t_end:
+        h, m, s_ = time.localtime()[3:6]
+        b.send(bytes([0xFF, 0x01, 9, 0x01, 20, 30, 80, 0, h, m, s_, 1]))  # status: evt bit0 = key down
+        n_taps += 1
+        time.sleep(0.15)
+    time.sleep(0.5)
+    b.buf = b""
+    b.ser.reset_input_buffer()
+    q = b.query()
+    check("board alive after %d typing events with the cat on screen" % n_taps, q is not None and (q.flags & 1), q)
+
     # 10 reset
     a = b.reset_layout()
     q = b.query()
