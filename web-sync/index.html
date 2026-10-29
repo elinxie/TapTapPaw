@@ -386,6 +386,224 @@ async function uploadLayoutBytes(bytes, io, opts = {}) {
   return { ok: true, ack: q, message: 'layout stored and verified' };
 }
 
+// ---- Layout editor model (pure logic, no DOM): pages, widgets, snapping, z-order, undo/redo, templates, import/export. Tested in test-editor.mjs ----
+// name = shown in the palette; w,h = default size; fixed = the firmware draws it at that size whatever w,h say; o = options the property panel offers
+const WIDGET_DEFS = {
+  ac: { name: 'Analog clock', w: 90, h: 90, fixed: true, o: [] },
+  dc: { name: 'Digital clock', w: 130, h: 28, o: ['f', 'q', 'z', 'a', 'c'] },
+  wx: { name: 'Weather', w: 76, h: 96, o: ['k', 'c'] },
+  np: { name: 'Now playing', w: 200, h: 64, o: ['c'] },
+  sb: { name: 'System bars', w: 130, h: 45, o: [] },
+  tc: { name: 'Tap counter', w: 110, h: 20, o: ['z', 'a', 'c'] },
+  tx: { name: 'Text label', w: 130, h: 20, o: ['s', 'z', 'a', 'c'] },
+  mc: { name: 'Mood cat', w: 200, h: 132, fixed: true, o: [] },
+  sh: { name: 'Shape / divider', w: 100, h: 4, o: ['k', 'c', 'o', 'r'] },
+  sl: { name: 'Slider', w: 150, h: 16, o: ['k', 'c'] },
+};
+const WALLPAPERS = ['Sunny', 'Cloudy', 'Rainy', 'Stormy', 'Snowy', 'Night'];
+// what the board shows with nothing connected is a placeholder; the preview and dry run use this sample instead
+const SAMPLE = { h: 10, m: 9, s: 30, group: 0, tempC: 21, humidity: 48, wh: 10, wm: 5, title: 'Moonlight Sonata', artist: 'Beethoven', media: 1, cpu: 37, mem: 62, batt: 80, taps: 128, mood: 0 };
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const deepCopy = (o) => JSON.parse(JSON.stringify(o));
+const snapTo = (v, g) => (g > 1 ? Math.round(v / g) * g : Math.round(v));
+
+function newPage() { return { main: false, bg: { t: 'w' }, w: [] }; }
+
+// Turns a validated layout object (schema v1) into editor state with ids.
+function stateFromLayout(lay, nextId) {
+  const st = { rot: lay.rot | 0, pages: [] };
+  for (const p of lay.pg) {
+    if (p.m === 1) { st.pages.push({ main: true, bg: { t: 'w' }, w: [] }); continue; }
+    const page = { main: false, bg: p.bg ? deepCopy(p.bg) : { t: 'w' }, w: [] };
+    for (const w of (p.w || [])) page.w.push(Object.assign({ id: nextId() }, deepCopy(w)));
+    st.pages.push(page);
+  }
+  return st;
+}
+
+// Editor state -> layout object. Drops options equal to their default so the file stays small.
+function layoutFromState(st) {
+  const lay = { v: LAYOUT.VERSION };
+  if (st.rot) lay.rot = st.rot;
+  lay.pg = st.pages.map((p) => {
+    if (p.main) return { m: 1 };
+    const o = {};
+    if (p.bg && p.bg.t !== 'w') o.bg = deepCopy(p.bg);
+    o.w = p.w.map((w) => {
+      const r = { t: w.t, x: w.x, y: w.y, w: w.w, h: w.h };
+      for (const k of ['k', 'z', 'a', 'r']) if (w[k]) r[k] = w[k];
+      if (w.o !== undefined && w.o !== 255) r.o = w.o;
+      if (w.f) r.f = 1;
+      if (w.q) r.q = 1;
+      if (w.c) r.c = w.c;
+      if (w.t === 'tx') r.s = w.s || '';
+      return r;
+    });
+    return o;
+  });
+  return lay;
+}
+
+function createEditor(initial) {
+  let uid = 1;
+  const nextId = () => 'w' + (uid++);
+  let st = initial ? stateFromLayout(initial, nextId) : { rot: 0, pages: [newPage()] };
+  let undoStack = [], redoStack = [], open = false;
+  const listeners = [];
+  const emit = () => listeners.forEach((f) => f());
+  const snapshot = () => JSON.stringify(st);
+
+  const ed = {
+    grid: 4,
+    get state() { return st; },
+    onChange(f) { listeners.push(f); },
+    // history: begin() once before a gesture (drag, typing burst), change() for each step, end() after. edit() = all three.
+    begin() { if (open) return; undoStack.push(snapshot()); if (undoStack.length > 100) undoStack.shift(); redoStack = []; open = true; },
+    end() { open = false; emit(); },
+    change(fn) { fn(st); emit(); },
+    edit(fn) { ed.begin(); fn(st); open = false; emit(); },
+    canUndo() { return undoStack.length > 0; },
+    canRedo() { return redoStack.length > 0; },
+    undo() { if (!undoStack.length) return false; redoStack.push(snapshot()); st = JSON.parse(undoStack.pop()); open = false; emit(); return true; },
+    redo() { if (!redoStack.length) return false; undoStack.push(snapshot()); st = JSON.parse(redoStack.pop()); open = false; emit(); return true; },
+
+    find(id) {
+      for (let pi = 0; pi < st.pages.length; pi++) { const wi = st.pages[pi].w.findIndex((w) => w.id === id); if (wi >= 0) return { pi, wi, w: st.pages[pi].w[wi] }; }
+      return null;
+    },
+    total() { return st.pages.reduce((n, p) => n + p.w.length, 0); },
+    textBytes() { return st.pages.reduce((n, p) => n + p.w.reduce((m, w) => m + (w.t === 'tx' ? utf8(w.s || '').length + 1 : 0), 0), 0); },
+
+    // ---- pages ----
+    addPage() {
+      if (st.pages.length >= LAYOUT.MAX_PAGES) return { ok: false, why: 'at most ' + LAYOUT.MAX_PAGES + ' pages' };
+      ed.edit((s) => s.pages.push(newPage())); return { ok: true, index: st.pages.length - 1 };
+    },
+    addMainPage() {
+      if (st.pages.some((p) => p.main)) return { ok: false, why: 'the original screen is already a page' };
+      if (st.pages.length >= LAYOUT.MAX_PAGES) return { ok: false, why: 'at most ' + LAYOUT.MAX_PAGES + ' pages' };
+      ed.edit((s) => s.pages.unshift({ main: true, bg: { t: 'w' }, w: [] })); return { ok: true, index: 0 };
+    },
+    removePage(i) {
+      if (st.pages.length <= 1 || i < 0 || i >= st.pages.length) return { ok: false, why: 'a layout needs at least one page' };
+      ed.edit((s) => s.pages.splice(i, 1)); return { ok: true };
+    },
+    movePage(i, dir) {
+      const j = i + dir; if (j < 0 || j >= st.pages.length) return false;
+      ed.edit((s) => { const [p] = s.pages.splice(i, 1); s.pages.splice(j, 0, p); }); return true;
+    },
+    setBg(i, bg) { ed.edit((s) => { s.pages[i].bg = bg; }); },
+    setRot(sec) { ed.edit((s) => { s.rot = sec === 0 ? 0 : clamp(Math.round(sec), 3, 600); }); },
+
+    // ---- widgets ----
+    addWidget(pi, t) {
+      const d = WIDGET_DEFS[t], page = st.pages[pi];
+      if (!d || !page) return { ok: false, why: 'unknown widget' };
+      if (page.main) return { ok: false, why: 'the original screen page cannot hold widgets' };
+      if (page.w.length >= LAYOUT.MAX_WIDGETS_PAGE) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_PAGE + ' widgets per page' };
+      if (ed.total() >= LAYOUT.MAX_WIDGETS_TOTAL) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_TOTAL + ' widgets in total' };
+      if (t === 'tx' && ed.textBytes() + 'Text'.length + 1 > LAYOUT.MAX_TEXT_POOL) return { ok: false, why: 'label text budget is full' };
+      const off = (page.w.length % 6) * 8; // cascade so new widgets do not hide each other
+      const w = { id: nextId(), t, x: clamp(snapTo((LAYOUT.W - d.w) / 2, ed.grid) + off, 0, LAYOUT.W - d.w), y: clamp(snapTo((LAYOUT.H - d.h) / 2, ed.grid) + off, 0, LAYOUT.H - d.h), w: d.w, h: d.h };
+      if (t === 'tx') w.s = 'Text';
+      ed.edit(() => page.w.push(w));
+      return { ok: true, id: w.id };
+    },
+    // geometry in screen pixels; snaps to the grid, clamps to the 320x240 screen, fixed-size widgets keep their size
+    setGeom(id, g, opts) {
+      const f = ed.find(id); if (!f) return false;
+      const w = f.w, d = WIDGET_DEFS[w.t], grid = (opts && opts.noSnap) ? 1 : ed.grid;
+      const nw = d.fixed ? d.w : clamp(snapTo(g.w !== undefined ? g.w : w.w, grid) || grid, 4, LAYOUT.W);
+      const nh = d.fixed ? d.h : clamp(snapTo(g.h !== undefined ? g.h : w.h, grid) || grid, 2, LAYOUT.H);
+      const nx = clamp(snapTo(g.x !== undefined ? g.x : w.x, grid), 0, LAYOUT.W - nw);
+      const ny = clamp(snapTo(g.y !== undefined ? g.y : w.y, grid), 0, LAYOUT.H - nh);
+      ed.change(() => { w.x = nx; w.y = ny; w.w = nw; w.h = nh; });
+      return true;
+    },
+    setProp(id, key, value) {
+      const f = ed.find(id); if (!f) return { ok: false, why: 'no such widget' };
+      if (key === 's') {
+        value = String(value);
+        if (utf8(value).length > LAYOUT.MAX_TEXT_LEN) return { ok: false, why: 'at most ' + LAYOUT.MAX_TEXT_LEN + ' bytes (letters with accents count 2)' };
+        if (/[\u0000-\u001F]/.test(value) || BAD_SURROGATE.test(value)) return { ok: false, why: 'control characters are not allowed' };
+        if (ed.textBytes() - utf8(f.w.s || '').length + utf8(value).length > LAYOUT.MAX_TEXT_POOL - 1) return { ok: false, why: 'label text budget is full' };
+      }
+      ed.change(() => { if (value === undefined || value === null || value === '' && key !== 's') delete f.w[key]; else f.w[key] = value; });
+      return { ok: true };
+    },
+    remove(id) { const f = ed.find(id); if (!f) return false; ed.edit((s) => s.pages[f.pi].w.splice(f.wi, 1)); return true; },
+    duplicate(id) {
+      const f = ed.find(id); if (!f) return { ok: false, why: 'no such widget' };
+      const page = st.pages[f.pi], d = WIDGET_DEFS[f.w.t];
+      if (page.w.length >= LAYOUT.MAX_WIDGETS_PAGE) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_PAGE + ' widgets per page' };
+      if (ed.total() >= LAYOUT.MAX_WIDGETS_TOTAL) return { ok: false, why: 'at most ' + LAYOUT.MAX_WIDGETS_TOTAL + ' widgets in total' };
+      if (f.w.t === 'tx' && ed.textBytes() + utf8(f.w.s || '').length + 1 > LAYOUT.MAX_TEXT_POOL) return { ok: false, why: 'label text budget is full' };
+      const c = Object.assign(deepCopy(f.w), { id: nextId() });
+      c.x = clamp(c.x + 8, 0, LAYOUT.W - c.w); c.y = clamp(c.y + 8, 0, LAYOUT.H - c.h);
+      ed.edit(() => page.w.splice(f.wi + 1, 0, c));
+      return { ok: true, id: c.id };
+    },
+    // z-order = position in the page's list: the last widget is drawn on top
+    z(id, how) {
+      const f = ed.find(id); if (!f) return false;
+      const a = st.pages[f.pi].w, i = f.wi;
+      const j = how === 'front' ? a.length - 1 : how === 'back' ? 0 : how === 'up' ? Math.min(a.length - 1, i + 1) : Math.max(0, i - 1);
+      if (j === i) return false;
+      ed.edit(() => { const [w] = a.splice(i, 1); a.splice(j, 0, w); }); return true;
+    },
+
+    // ---- files ----
+    toLayout() { return layoutFromState(st); },
+    // { ok, text, bytes, err } : text is exactly what is sent to the board
+    toJSON() {
+      const text = JSON.stringify(layoutFromState(st));
+      const v = validateLayout(text);
+      return v.ok ? { ok: true, text, bytes: v.bytes, size: v.bytes.length } : { ok: false, text, err: v.err };
+    },
+    load(text) {
+      const v = validateLayout(text);
+      if (!v.ok) return { ok: false, err: v.err };
+      ed.begin(); st = stateFromLayout(JSON.parse(text), nextId); open = false; emit();
+      return { ok: true };
+    },
+    reset(layout) { ed.begin(); st = layout ? stateFromLayout(layout, nextId) : { rot: 0, pages: [newPage()] }; open = false; emit(); },
+  };
+  return ed;
+}
+
+// ---- templates: complete layouts, validated by the tests ----
+const TEMPLATES = [
+  { name: 'Blank', layout: { v: 1, pg: [{}] } },
+  { name: 'Original screen', layout: { v: 1, pg: [{ m: 1 }] } },
+  { name: 'Clock and weather', layout: { v: 1, pg: [{ w: [
+    { t: 'dc', x: 16, y: 20, w: 200, h: 40, f: 1, z: 1, c: '#fbc979' },
+    { t: 'tx', x: 16, y: 64, w: 200, h: 20, s: 'Desk companion', c: '#a99bb3' },
+    { t: 'wx', x: 232, y: 12, w: 80, h: 100 },
+    { t: 'mc', x: 60, y: 104, w: 200, h: 132 },
+  ] }] } },
+  { name: 'Music desk', layout: { v: 1, pg: [{ bg: { t: 'g', c: '#1b1620', d: '#3a2a55' }, w: [
+    { t: 'np', x: 8, y: 12, w: 304, h: 84 },
+    { t: 'dc', x: 8, y: 108, w: 150, h: 28, f: 1, z: 1 },
+    { t: 'sb', x: 8, y: 150, w: 200, h: 54 },
+    { t: 'tc', x: 216, y: 150, w: 96, h: 20, a: 2 },
+    { t: 'sl', x: 8, y: 214, w: 140, h: 16, k: 1 },
+  ] }] } },
+  { name: 'Original + dashboard', layout: { v: 1, pg: [{ m: 1 }, { bg: { t: 'b', i: 5 }, w: [
+    { t: 'ac', x: 115, y: 14, w: 90, h: 90 },
+    { t: 'wx', x: 12, y: 14, w: 80, h: 100 },
+    { t: 'sb', x: 228, y: 14, w: 84, h: 90 },
+    { t: 'np', x: 8, y: 124, w: 304, h: 64 },
+    { t: 'sl', x: 12, y: 208, w: 130, h: 16, k: 0 },
+    { t: 'sl', x: 178, y: 208, w: 130, h: 16, k: 1 },
+  ] }] } },
+  { name: 'Three-page tour', layout: { v: 1, rot: 8, pg: [
+    { w: [{ t: 'dc', x: 40, y: 90, w: 240, h: 40, f: 1, z: 1, a: 1 }] },
+    { bg: { t: 'g', c: '#102030', d: '#3050a0' }, w: [{ t: 'wx', x: 120, y: 60, w: 80, h: 100 }] },
+    { bg: { t: 's', c: '#000000' }, w: [{ t: 'mc', x: 60, y: 54, w: 200, h: 132 }] },
+  ] } },
+];
+
 // ---- UI ---- (everything below needs a browser; the packet code above is unit-tested in test-packets.mjs)
 if (!window.__ttpReturn) { // the Spotify sign-in popup only runs the small script in <head>
 const $ = (id) => document.getElementById(id);
