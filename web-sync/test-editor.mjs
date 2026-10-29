@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const code = html.split('<script>')[1].split('// ---- UI ----')[0];
-const lib = new Function(code + '; return { pkt, LAYOUT, WIDGET_DEFS, TEMPLATES, SAMPLE, createEditor, validateLayout, layoutFromState };')();
+const lib = new Function(code + '; return { pkt, LAYOUT, WIDGET_DEFS, TEMPLATES, SAMPLE, PREVIEW_ART, createEditor, validateLayout, layoutFromState };')();
 const { LAYOUT, WIDGET_DEFS, TEMPLATES, createEditor, validateLayout } = lib;
 const TYPES = Object.keys(WIDGET_DEFS);
 const ids = (ed, pi = 0) => ed.state.pages[pi].w.map((w) => w.id);
@@ -202,4 +202,12 @@ for (const t of TEMPLATES) {
 
 // sample data is complete for the preview and dry run
 for (const k of ['h', 'm', 's', 'group', 'tempC', 'humidity', 'title', 'artist', 'media', 'cpu', 'mem', 'batt', 'taps']) assert.ok(k in lib.SAMPLE, k);
+// preview art generated from the firmware images is present and well formed
+for (const k of ['wall0', 'wall1', 'wall2', 'wall3', 'wall4', 'wall5', 'cat', 'eyes', 'sleepy', 'clock', 'hh', 'mh', 'sh', 'i0', 'i1', 'i2', 'i3', 'i4', 'i5'])
+  assert.match(lib.PREVIEW_ART[k], /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]{100,}$/, 'preview art ' + k);
 console.log('editor tests ok');
+{
+  const ed = createEditor(); ed.addWidget(0, 'tc'); ed.clearHistory();
+  assert.equal(ed.canUndo(), false); assert.equal(ed.canRedo(), false); assert.equal(ed.state.pages[0].w.length, 1, 'clearHistory keeps the content');
+  console.log('editor history clear ok');
+}

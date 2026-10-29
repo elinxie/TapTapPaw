@@ -4,9 +4,32 @@ The board can show a **layout** instead of its built-in main screen: several pag
 240x320 (portrait) canvas, each page with its own background. Nothing is compiled: the web page builds a small JSON file and sends it to the
 board over USB; the firmware reads it and builds the screens.
 
-Status: **Phase 1 (layout engine + upload protocol)** is implemented. The drag-and-drop builder page (Phase 2) and custom image
-backgrounds (Phase 3) are not. Until then a layout is written as JSON by hand (see `layout-example.json`) and sent with
-`scripts/layout_tool.py`.
+Status: **Phase 1 (layout engine + upload protocol)** and **Phase 2 (the builder on the web page)** are done. Custom image backgrounds
+(Phase 3) are not.
+
+## Using the builder (web page)
+
+Open the web-sync page (`WEB_SYNC.md`) in Chrome or Edge. The **Widget builder** section is right under Connection.
+
+1. Pick a template, or start from what is there. Your last layout is kept in this browser (also across reloads).
+2. Page tabs on top: **+ Page** adds a page, **+ Original screen** adds the board's original screen as the first page. Page 1 is the
+   home page the board starts on.
+3. The buttons under the screen add widgets to the current page. Click a widget to select it, drag to move, drag the blue handles to
+   resize. Snapping follows the Grid setting; hold Shift while dragging to turn it off. Arrow keys nudge (Alt = 1 px), Delete removes,
+   Ctrl/Cmd+D duplicates, Ctrl/Cmd+Z / Shift+Ctrl/Cmd+Z undo and redo.
+4. The panel on the right edits the page (background, order, auto-rotate) and the selected widget (position, size, text, colors,
+   options, front/back order).
+5. **Connect to board**, then **Send to board**. The progress bar shows the chunks; the page reads the checksum back to confirm.
+   **Check board** says whether the board has the layout you see. **Reset board to default** deletes the board's layout.
+6. **Export** saves the layout as a `.json` file, **Import** loads one, **Save as** keeps named layouts in this browser.
+
+**Dry run** (Connection) works without a board: a simulated board answers the upload so you can try the whole flow, and the log shows
+every packet.
+
+The preview uses the board's own wallpapers, cat, clock face and weather icons (taken from the firmware by
+`scripts/make_preview_assets.py`), the same sizes and line heights as the board's fonts, and the page's own time, weather and typed
+music. Fonts are close, not identical (the board's Montserrat, Itim and DynaPuff are not loaded from the internet, so the browser's
+fallback fonts are used).
 
 ## What is and is not possible
 
