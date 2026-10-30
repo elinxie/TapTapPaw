@@ -5,6 +5,7 @@
 #include "keymap.h"
 #include "pets/pets.h"
 #include "sounds.h"
+#include "gifs.h"
 #include "layout_core.h"
 #include "ui/ui.h"
 #include <LittleFS.h>
@@ -107,6 +108,8 @@ static bool file_exists() { return path_exists(FINAL_PATH); }
 
 // ---- pictures (upload kind 1, LittleFS /img/<slot>.sjpg) and album art (kind 2, RAM only) ----
 static const char *PIC_TMP = "/img/tmp.part";
+static const char *GIF_TMP = "/gif/tmp.part";
+static void gif_path(uint8_t slot, char *out, size_t n) { snprintf(out, n, "/gif/%u.gif", (unsigned)slot); }
 static const char *SND_TMP = "/snd/tmp.part"; // custom sounds (upload kind 3) live in /snd/<slot>.wav; the originals stay in the root
 static void snd_path(uint8_t slot, char *out, size_t n) { snprintf(out, n, "/snd/%u.wav", (unsigned)slot); }
 void audioStopAndWait(uint16_t ms); // main.cpp: a file that is playing must not be replaced or deleted
@@ -124,7 +127,7 @@ static lv_img_dsc_t art_dsc; // LVGL decodes the JPEG from RAM with its SJPG/JPE
 class FsStorage : public lc::Storage {
   File f;
   uint8_t kind = 0;
-  const char *tmp_path() const { return kind == lc::KIND_PICTURE ? PIC_TMP : kind == lc::KIND_SOUND ? SND_TMP : TMP_PATH; }
+  const char *tmp_path() const { return kind == lc::KIND_PICTURE ? PIC_TMP : kind == lc::KIND_SOUND ? SND_TMP : kind == lc::KIND_GIF ? GIF_TMP : TMP_PATH; }
 
  public:
   size_t free_bytes() override { return LittleFS.totalBytes() - LittleFS.usedBytes(); }
@@ -139,6 +142,7 @@ class FsStorage : public lc::Storage {
     }
     if (k == lc::KIND_PICTURE && !path_exists("/img")) LittleFS.mkdir("/img");
     if (k == lc::KIND_SOUND && !path_exists("/snd")) LittleFS.mkdir("/snd");
+    if (k == lc::KIND_GIF && !path_exists("/gif")) LittleFS.mkdir("/gif");
     f = LittleFS.open(tmp_path(), "w");
     return (bool)f;
   }
@@ -212,6 +216,10 @@ class FsStorage : public lc::Storage {
     }
     char fin[24];
     if (k == lc::KIND_PICTURE) pic_path(slot, fin, sizeof fin);
+    else if (k == lc::KIND_GIF) {
+      gif_path(slot, fin, sizeof fin);
+      gifs_release(slot); // a GIF on screen holds its file open
+    }
     else if (k == lc::KIND_SOUND) {
       snd_path(slot, fin, sizeof fin);
       audioStopAndWait(800); // the old copy may be playing right now
@@ -273,6 +281,7 @@ class FsStorage : public lc::Storage {
     lp.end();
   }
   bool picture_check(uint8_t k, uint8_t slot) override {
+    if (k == lc::KIND_GIF) return gif_decode_test(slot);
     char lvp[24];
     const void *src = &art_dsc;
     if (k == lc::KIND_PICTURE) {
@@ -293,6 +302,36 @@ class FsStorage : public lc::Storage {
     lv_img_decoder_close(&dsc);
     log_i("picture check kind %u slot %u: %s", (unsigned)k, (unsigned)slot, ok ? "decodes" : "CANNOT decode");
     return ok;
+  }
+  uint32_t gif_size(uint8_t slot) override {
+    char p[40];
+    snprintf(p, sizeof p, "/littlefs/gif/%u.gif", (unsigned)slot);
+    struct stat s;
+    return stat(p, &s) == 0 ? (uint32_t)s.st_size : 0;
+  }
+  uint32_t gif_crc(uint8_t slot) override {
+    if (gif_size(slot) == 0) return 0;
+    Preferences lp;
+    lp.begin("layout", true);
+    char key[8];
+    snprintf(key, sizeof key, "gif%u", (unsigned)slot);
+    uint32_t c = lp.getUInt(key, 0);
+    lp.end();
+    return c;
+  }
+  void set_gif_crc(uint8_t slot, uint32_t c) override {
+    Preferences lp;
+    lp.begin("layout", false);
+    char key[8];
+    snprintf(key, sizeof key, "gif%u", (unsigned)slot);
+    lp.putUInt(key, c);
+    lp.end();
+  }
+  bool gif_remove(uint8_t slot) override {
+    char p[24];
+    gif_path(slot, p, sizeof p);
+    gifs_release(slot);
+    return !path_exists(p) || LittleFS.remove(p);
   }
   uint32_t sound_size(uint8_t slot) override {
     char p[40];
@@ -660,6 +699,17 @@ static void build_widget(lv_obj_t *p, const Widget &w, RT &r) {
       break;
     }
     case lc::W_PET: r.a = pet_create(p, w.x, w.y, w.n); break;
+    case lc::W_GIF: {
+      r.a = gif_create(p, w.x, w.y, w.w, w.h, w.i);
+      if (!r.a) { // no GIF in that slot (or no memory): a placeholder box
+        lv_obj_t *o = mkbox(p, w);
+        lv_obj_t *l = lv_label_create(o);
+        lv_label_set_text(l, "GIF");
+        lv_obj_center(l);
+        r.a = o;
+      }
+      break;
+    }
     case lc::W_TCAT: { // the original screen's typing cat, same parts and offsets; layout_sync_cat() mirrors their state
       lv_obj_t *o = lv_obj_create(p);
       lv_obj_remove_style_all(o);
@@ -1325,6 +1375,7 @@ static void activate() {
     lv_timer_create(rotate_cb, 1000, NULL);
     lv_timer_create(timers_cb, 250, NULL); // pomodoro and reminders keep running on any page
     lv_timer_create([](lv_timer_t *) { pets_tick(); }, 200, NULL); // ASCII pets animate at 5 frames a second
+    lv_timer_create([](lv_timer_t *) { gifs_tick(); }, 15, NULL); // GIF frames are decoded when their delay is up
   }
   for (uint8_t i = 0; i < L.nwidgets; i++) { // reminders count from now
     remind_next[i] = millis() + (uint32_t)L.widgets[i].p * 60000UL;
@@ -1409,6 +1460,7 @@ void layout_begin(bool boot_held) {
   if (path_exists(TMP_PATH)) LittleFS.remove(TMP_PATH); // leftover of an upload that was cut by a reset or power loss
   if (path_exists(PIC_TMP)) LittleFS.remove(PIC_TMP);
   if (path_exists(SND_TMP)) LittleFS.remove(SND_TMP);
+  if (path_exists(GIF_TMP)) LittleFS.remove(GIF_TMP);
   sounds_init(); // which custom sounds exist
   bool stored = file_exists();
   if (stored && stored_crc_cache == 0) stored_crc_cache = 0xFFFFFFFFu; // a layout file with unknown crc (should not happen)

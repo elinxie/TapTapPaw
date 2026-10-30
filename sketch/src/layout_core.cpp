@@ -184,7 +184,7 @@ Err int_in(P &p, int32_t lo, int32_t hi, int32_t &v) {
 }
 
 WType wtype_from(const char *s, size_t l) {
-  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl", "ct", "pm", "cd", "sw", "dt", "fs", "bt", "sp", "aa", "rm", "pc", "pt"};
+  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl", "ct", "pm", "cd", "sw", "dt", "fs", "bt", "sp", "aa", "rm", "pc", "pt", "gf"};
   for (uint8_t i = 1; i < W_COUNT; i++)
     if (key_is(s, l, names[i])) return (WType)i;
   return W_NONE;
@@ -268,6 +268,7 @@ Err parse_widget(P &p, Layout &L) {
       if (!has_text || tl == 0) return E_TEXT;
       break;
     case W_PICTURE: if (!hi) return E_RANGE; break;
+    case W_GIF: if (!hi || w.i >= GIF_SLOTS) return E_RANGE; break;
     default: break;
   }
   bool keeps_text = (w.type == W_LABEL || w.type == W_BUTTON || w.type == W_FOCUS || w.type == W_COUNTDOWN);
@@ -463,6 +464,17 @@ bool wav_check(const uint8_t *h, size_t n, uint32_t total, uint16_t *rate_out) {
   return true;
 }
 
+bool gif_check(const uint8_t *h, size_t n, uint32_t total, const uint8_t *tail2, uint16_t *w_out, uint16_t *h_out) {
+  if (!h || n < 13 || total < 14 || total > MAX_GIF_BYTES) return false;
+  if (memcmp(h, "GIF87a", 6) && memcmp(h, "GIF89a", 6)) return false;
+  uint16_t w = le16(h + 6), hh = le16(h + 8);
+  if (w < 1 || w > GIF_MAX_SIDE || hh < 1 || hh > GIF_MAX_SIDE) return false;
+  if (!tail2 || tail2[1] != 0x3B) return false; // the file must end with the GIF trailer
+  if (w_out) *w_out = w;
+  if (h_out) *h_out = hh;
+  return true;
+}
+
 size_t ack_encode(const Ack &a, uint8_t *o) {
   o[0] = 0xFF;
   o[1] = PKT_ACK;
@@ -517,6 +529,10 @@ Ack Session::handle(uint8_t id, const uint8_t *p, uint8_t n) {
     case PKT_QUERY: // detail = feature level; with a slot byte the crc is that picture's; [3, slot]: that custom sound (detail = KB)
       if (n == 1 && p[0] < PICTURE_SLOTS) return make(id, ST_OK, FEATURE_LEVEL, true, st.picture_crc(p[0]));
       if (n == 2 && p[0] == KIND_PICTURE && p[1] < PICTURE_SLOTS) return make(id, ST_OK, FEATURE_LEVEL, true, st.picture_crc(p[1]));
+      if (n == 2 && p[0] == KIND_GIF && p[1] < GIF_SLOTS) {
+        uint32_t kb = (st.gif_size(p[1]) + 1023) / 1024;
+        return make(id, ST_OK, (uint8_t)(kb > 255 ? 255 : kb), true, st.gif_crc(p[1]));
+      }
       if (n == 2 && p[0] == KIND_SOUND && p[1] < SOUND_SLOTS) {
         uint32_t kb = (st.sound_size(p[1]) + 1023) / 1024;
         return make(id, ST_OK, (uint8_t)(kb > 255 ? 255 : kb), true, st.sound_crc(p[1]));
@@ -526,6 +542,13 @@ Ack Session::handle(uint8_t id, const uint8_t *p, uint8_t n) {
       if (n != 1 || p[0] >= SOUND_SLOTS) return make(id, ST_BAD_PKT);
       return st.sound_play(p[0]) ? make(id, ST_OK) : make(id, ST_UNSUPPORTED);
     case PKT_RESET:
+      if (n == 2 && p[0] == KIND_GIF && p[1] < GIF_SLOTS) { // delete one GIF
+        if (is_open && kind == KIND_GIF && slot == p[1]) drop();
+        if (!st.gif_remove(p[1])) return make(id, ST_IO);
+        st.set_gif_crc(p[1], 0);
+        pics_changed = true;
+        return make(id, ST_OK, 0, true, 0);
+      }
       if (n == 2 && p[0] == KIND_SOUND && p[1] < SOUND_SLOTS) { // delete the custom copy of one sound: the original file is never touched
         if (is_open && kind == KIND_SOUND && slot == p[1]) drop();
         if (!st.sound_remove(p[1])) return make(id, ST_IO);
@@ -553,12 +576,13 @@ Ack Session::do_begin(const uint8_t *p, uint8_t n) {
   if (n != 11) return make(PKT_BEGIN, ST_BAD_PKT);
   uint8_t k = p[0], sl = p[1], v = p[2];
   uint32_t tot = le32(p + 3), crc = le32(p + 7);
-  if (k > KIND_SOUND) return make(PKT_BEGIN, ST_BAD_PKT);
+  if (k > KIND_GIF) return make(PKT_BEGIN, ST_BAD_PKT);
+  if (k == KIND_GIF && (sl >= GIF_SLOTS || tot < 14)) return make(PKT_BEGIN, ST_BAD_PKT);
   if (k == KIND_PICTURE && sl >= PICTURE_SLOTS) return make(PKT_BEGIN, ST_BAD_PKT);
   if (k == KIND_SOUND && (sl >= SOUND_SLOTS || tot < WAV_HEADER_BYTES + 2)) return make(PKT_BEGIN, ST_BAD_PKT);
   if (v != SCHEMA_VERSION) return make(PKT_BEGIN, ST_INVALID, E_VERSION);
   if (tot == 0) return make(PKT_BEGIN, ST_BAD_PKT);
-  uint32_t cap = k == KIND_LAYOUT ? MAX_LAYOUT_BYTES : k == KIND_PICTURE ? MAX_PICTURE_BYTES : k == KIND_SOUND ? MAX_SOUND_BYTES : MAX_ART_BYTES;
+  uint32_t cap = k == KIND_LAYOUT ? MAX_LAYOUT_BYTES : k == KIND_PICTURE ? MAX_PICTURE_BYTES : k == KIND_SOUND ? MAX_SOUND_BYTES : k == KIND_GIF ? MAX_GIF_BYTES : MAX_ART_BYTES;
   if (tot > cap) return make(PKT_BEGIN, ST_TOO_BIG, k == KIND_LAYOUT ? E_TOO_BIG : 0);
   if (is_open && kind == k && slot == sl && ver == v && total == tot && want_crc == crc) return make(PKT_BEGIN, ST_OK); // resume: ack carries next_seq
   drop();
@@ -670,6 +694,7 @@ Ack Session::end_picture() {
   }
   bool ok;
   if (kind == KIND_SOUND) ok = wav_check(head, n < sizeof head ? n : sizeof head, (uint32_t)n);
+  else if (kind == KIND_GIF) ok = gif_check(head, n < sizeof head ? n : sizeof head, (uint32_t)n, tail);
   else if (kind == KIND_PICTURE) { // LVGL SJPG: "_SJPG__\0V1.00\0", width u16, height u16, splits u16, split height u16
     uint16_t w = (uint16_t)(head[14] | (head[15] << 8)), h = (uint16_t)(head[16] | (head[17] << 8)), parts = (uint16_t)(head[18] | (head[19] << 8));
     ok = n > 22 && memcmp(head, "_SJPG__", 7) == 0 && w >= 1 && w <= SCREEN_W && h >= 1 && h <= SCREEN_H && parts >= 1;
@@ -690,6 +715,20 @@ Ack Session::end_picture() {
     received = 0;
     next_seq = 0;
     return make(PKT_END, ST_OK, 0, true, want_crc);
+  }
+  if (kind == KIND_GIF) { // stored; the board's decoder must be able to open it and decode a frame
+    bool good = st.picture_check(kind, slot);
+    if (!good) {
+      st.gif_remove(slot);
+      st.set_gif_crc(slot, 0);
+    } else {
+      st.set_gif_crc(slot, want_crc);
+    }
+    is_open = false;
+    received = 0;
+    next_seq = 0;
+    pics_changed = true;
+    return good ? make(PKT_END, ST_OK, 0, true, want_crc) : make(PKT_END, ST_INVALID, 1);
   }
   if (!st.picture_check(kind, slot)) { // stored, but the board cannot decode it: remove it again
     if (kind == KIND_PICTURE) {

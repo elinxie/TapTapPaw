@@ -7,6 +7,7 @@ import argparse, os, re, struct, sys, time, zlib
 sys.path.insert(0, os.path.dirname(__file__))
 from layout_tool import Board, ST, begin_pkt, chunk_pkt, pkt, CHUNK
 import sound_smoke_test
+import gif_smoke_test
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 fails = 0
@@ -65,7 +66,7 @@ def main():
     # 3 oversized / bad framing
     a = b.call(begin_pkt(b"x" * 10, total=5000), 0x0B)
     check("oversized layout (5000 B) refused at BEGIN", a and a.status == ST["too big"], a)
-    a = b.call(begin_pkt(b"x" * 10, kind=4), 0x0B)
+    a = b.call(begin_pkt(b"x" * 10, kind=5), 0x0B)
     check("unknown upload kind refused", a and a.status == ST["bad packet"], a)
     a = b.call(chunk_pkt(example, 0), 0x0C)
     check("chunk without BEGIN refused", a and a.status == ST["no upload in progress"], a)
@@ -278,6 +279,9 @@ def main():
 
     # 17 custom sounds (kind 3): scripts/sound_smoke_test.py (also runnable on its own). Skips itself when you already keep custom sounds.
     sound_smoke_test.run(b, check, full)
+
+    # 18 GIF widget (kind 4): scripts/gif_smoke_test.py (also runnable on its own). Skips itself when you already keep GIFs.
+    gif_smoke_test.run(b, check, full)
 
     # 10 reset
     a = b.reset_layout()

@@ -276,6 +276,12 @@ struct MemStorage : Storage {
   uint32_t snd_crc[SOUND_SLOTS] = {0};
   std::string originals[SND_ORIGINALS]; // the board's original sound files: no upload or reset may ever change these
   int played = -1;
+  std::string gifs[GIF_SLOTS];
+  uint32_t gif_crc_[GIF_SLOTS] = {0};
+  uint32_t gif_crc(uint8_t slot) override { return gifs[slot].empty() ? 0 : gif_crc_[slot]; }
+  uint32_t gif_size(uint8_t slot) override { return (uint32_t)gifs[slot].size(); }
+  void set_gif_crc(uint8_t slot, uint32_t c) override { gif_crc_[slot] = c; }
+  bool gif_remove(uint8_t slot) override { gifs[slot].clear(); return true; }
   bool tmp_open(uint8_t k, uint8_t) override {
     kind = k;
     if (fail_open) return false;
@@ -316,6 +322,7 @@ struct MemStorage : Storage {
     if (k == KIND_PICTURE) pics[slot] = tmp;
     else if (k == KIND_ART) art = tmp;
     else if (k == KIND_SOUND) snds[slot] = tmp;
+    else if (k == KIND_GIF) gifs[slot] = tmp;
     else fin = tmp;
     tmp.clear();
     return true;
@@ -419,7 +426,7 @@ static void test_upload_errors() {
   uint8_t p[11] = {0};
   CHECK(s.handle(PKT_BEGIN, p, 10).status == ST_BAD_PKT);
   CHECK(s.handle(PKT_BEGIN, p, 12).status == ST_BAD_PKT);
-  CHECK(begin(s, d, 4).status == ST_BAD_PKT); // kinds: 0 layout, 1 picture, 2 album art, 3 sound
+  CHECK(begin(s, d, 5).status == ST_BAD_PKT); // kinds: 0 layout, 1 picture, 2 album art, 3 sound, 4 gif
   CHECK(begin(s, d, 7).status == ST_BAD_PKT);
   CHECK(begin(s, d, 0, 2).status == ST_INVALID);
   CHECK(begin(s, d, 0, 1, 0).status == ST_BAD_PKT);
@@ -702,7 +709,7 @@ static void test_sounds() {
   st.pic_crc[2] = 0x2222;
   for (int i = 0; i < SND_ORIGINALS; i++) st.originals[i] = "ORIGINAL" + std::to_string(i);
   auto originals_intact = [&]() { for (int i = 0; i < SND_ORIGINALS; i++) if (st.originals[i] != "ORIGINAL" + std::to_string(i)) return false; return true; };
-  CHECK(FEATURE_LEVEL == 3);
+  CHECK(FEATURE_LEVEL == 4);
   // one second of sound into the "pomodoro end" slot
   std::string wav = fake_wav(16000);
   uint32_t wc = crc32((const uint8_t *)wav.data(), wav.size());
@@ -805,6 +812,66 @@ static void test_sounds() {
   CHECK(originals_intact());
 }
 
+static std::string fake_gif(uint16_t w, uint16_t h, size_t total, const char *magic = "GIF89a") {
+  std::string g(magic, 6);
+  g.push_back((char)(w & 0xFF)); g.push_back((char)(w >> 8)); g.push_back((char)(h & 0xFF)); g.push_back((char)(h >> 8));
+  while (g.size() + 1 < total) g.push_back((char)(g.size() * 7));
+  g.push_back(0x3B);
+  return g;
+}
+
+static void test_gifs() {
+  MemStorage st;
+  Session s(st);
+  st.fin = "LAYOUT"; st.crc = 0x1111; st.pics[1] = "PICTURE"; st.snds[3] = "SOUND"; st.snd_crc[3] = 0x3333;
+  std::string g = fake_gif(96, 96, 30000);
+  uint32_t gc = crc32((const uint8_t *)g.data(), g.size());
+  CHECK(begin_kind(s, g, KIND_GIF, 2).status == ST_OK);
+  Ack a = send_all(s, g);
+  CHECK(a.status == ST_OK && a.crc == gc && st.gifs[2] == g && st.gif_crc_[2] == gc && !s.open());
+  CHECK(st.fin == "LAYOUT" && st.pics[1] == "PICTURE" && st.snds[3] == "SOUND"); // nothing else is touched
+  CHECK(s.take_pictures_changed() && !s.take_changed());
+  uint8_t q[2] = {KIND_GIF, 2};
+  a = s.handle(PKT_QUERY, q, 2);
+  CHECK(a.status == ST_OK && a.crc == gc && a.detail == 30); // 30000 B -> 30 KB
+  q[1] = 0; CHECK(s.handle(PKT_QUERY, q, 2).crc == 0);
+  q[1] = GIF_SLOTS; CHECK(s.handle(PKT_QUERY, q, 2).status == ST_BAD_PKT);
+  CHECK(begin_kind(s, g, KIND_GIF, GIF_SLOTS).status == ST_BAD_PKT);
+  CHECK(begin_kind(s, std::string(10, 'g'), KIND_GIF, 0).status == ST_BAD_PKT);
+  CHECK(begin_kind(s, fake_gif(96, 96, MAX_GIF_BYTES + 1), KIND_GIF, 0).status == ST_TOO_BIG);
+  CHECK(begin_kind(s, fake_gif(128, 128, MAX_GIF_BYTES), KIND_GIF, 1).status == ST_OK && send_all(s, fake_gif(128, 128, MAX_GIF_BYTES)).status == ST_OK); // the largest
+  std::string good = fake_gif(64, 64, 2000), bads[] = {fake_gif(64, 64, 2000, "GIF90a"), fake_gif(129, 64, 2000), fake_gif(64, 129, 2000), fake_gif(0, 64, 2000), fake_gif(64, 0, 2000), good.substr(0, good.size() - 1) + "x", std::string(3000, 'x')};
+  for (const std::string &b : bads) {
+    std::string before = st.gifs[3];
+    CHECK(begin_kind(s, b, KIND_GIF, 3).status == ST_OK);
+    CHECK(send_all(s, b).status == ST_INVALID && st.gifs[3] == before && !s.open());
+  }
+  CHECK(begin_kind(s, fake_gif(128, 128, 2000, "GIF87a"), KIND_GIF, 3).status == ST_OK && send_all(s, fake_gif(128, 128, 2000, "GIF87a")).status == ST_OK); // GIF87a is fine
+  st.undecodable = true; // the board's decoder refuses it: removed again, detail 1
+  CHECK(begin_kind(s, good, KIND_GIF, 0).status == ST_OK);
+  a = send_all(s, good);
+  CHECK(a.status == ST_INVALID && a.detail == 1 && st.gifs[0].empty());
+  st.undecodable = false;
+  st.corrupt_readback = true;
+  CHECK(begin_kind(s, good, KIND_GIF, 0).status == ST_OK && send_all(s, good).status == ST_CRC && st.gifs[0].empty());
+  st.corrupt_readback = false;
+  st.free_b = 30000;
+  CHECK(begin_kind(s, g, KIND_GIF, 0).status == ST_NO_SPACE);
+  st.free_b = 200000;
+  CHECK(begin_kind(s, g, KIND_GIF, 0).status == ST_OK);
+  for (int j = 0; j < 40; j++) chunk(s, g, (uint16_t)j);
+  a = begin_kind(s, g, KIND_GIF, 0);
+  CHECK(a.status == ST_OK && a.seq == 40);
+  for (size_t j = 40; j < nchunks(g); j++) chunk(s, g, (uint16_t)j);
+  CHECK(s.handle(PKT_END, nullptr, 0).status == ST_OK && st.gifs[0] == g);
+  uint8_t rs[2] = {KIND_GIF, 0};
+  CHECK(s.handle(PKT_RESET, rs, 2).status == ST_OK && st.gifs[0].empty() && st.gif_crc_[0] == 0 && st.gifs[2] == g);
+  CHECK(st.fin == "LAYOUT" && st.pics[1] == "PICTURE" && st.snds[3] == "SOUND");
+  rs[1] = GIF_SLOTS; CHECK(s.handle(PKT_RESET, rs, 2).status == ST_BAD_PKT);
+  uint16_t w = 0, h = 0;
+  CHECK(gif_check((const uint8_t *)good.data(), 44, (uint32_t)good.size(), (const uint8_t *)(good.data() + good.size() - 2), &w, &h) && w == 64 && h == 64);
+}
+
 int main() {
   test_crc();
   test_parse_good();
@@ -818,6 +885,7 @@ int main() {
   test_pictures();
   test_wav_check();
   test_sounds();
+  test_gifs();
   printf("layout_core: %d checks passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

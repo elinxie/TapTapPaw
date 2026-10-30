@@ -22,7 +22,10 @@ constexpr uint8_t SOUND_SLOTS = 15; // upload kind 3: a custom sound (canonical 
 constexpr uint32_t WAV_HEADER_BYTES = 44;
 constexpr uint32_t MAX_SOUND_BYTES = WAV_HEADER_BYTES + 5 * 16000 * 2; // 5 s of 16 kHz mono 16-bit
 constexpr uint16_t SOUND_RATE_MIN = 8000, SOUND_RATE_MAX = 24000; // what the page may resample to
-enum Kind : uint8_t { KIND_LAYOUT = 0, KIND_PICTURE = 1, KIND_ART = 2, KIND_SOUND = 3 };
+constexpr uint8_t GIF_SLOTS = 4; // upload kind 4: an animated GIF in LittleFS /gif/<slot>.gif
+constexpr uint32_t MAX_GIF_BYTES = 65536;
+constexpr uint16_t GIF_MAX_SIDE = 128; // canvas of at most 128x128 (32 KB of RGB565 in heap, plus about 24 KB for the decoder)
+enum Kind : uint8_t { KIND_LAYOUT = 0, KIND_PICTURE = 1, KIND_ART = 2, KIND_SOUND = 3, KIND_GIF = 4 };
 // Sound slots. 0..7 have an original file on the board (connect.wav ...); a custom copy in /snd is played instead while it exists.
 // 8..14 have no file of their own: without a custom copy the board uses its built-in beeps.
 enum SoundSlot : uint8_t {
@@ -39,13 +42,17 @@ enum WType : uint8_t {
   // feature level 2
   W_TCAT, W_POMO, W_COUNTDOWN, W_STOPWATCH, W_DATE, W_FOCUS, W_BUTTON, W_SPOTIFY, W_ALBUM, W_REMIND, W_PICTURE,
   W_PET, // ASCII pet (src/pets), fixed 160x132, species in "n"
+  // feature level 4
+  W_GIF, // animated GIF from slot "i" (0..3), drawn at its own size, centered in the box
   W_COUNT
 };
 // Does `h` (the first WAV_HEADER_BYTES bytes) describe a sound the board can play, in a file of `total` bytes? Canonical layout only:
 // RIFF/WAVE, "fmt " (16 bytes, PCM, mono, 16-bit, rate SOUND_RATE_MIN..MAX), "data" running to the end of the file. Same rules as the page.
 bool wav_check(const uint8_t *h, size_t n, uint32_t total, uint16_t *rate_out = nullptr);
+// A GIF the board can show: "GIF87a"/"GIF89a", canvas 1..128 x 1..128, ends with the 0x3B trailer. (The decoder test on the board does the rest.)
+bool gif_check(const uint8_t *h, size_t n, uint32_t total, const uint8_t *tail2, uint16_t *w_out = nullptr, uint16_t *h_out = nullptr);
 // What this firmware understands; reported in the QUERY ack's detail byte (older firmware answers 0).
-constexpr uint8_t FEATURE_LEVEL = 3;
+constexpr uint8_t FEATURE_LEVEL = 4;
 constexpr uint8_t PICTURE_SLOTS = 8;
 
 // Button widget actions ("e"). Arg ("g") only for the ones marked.
@@ -140,6 +147,7 @@ inline uint32_t crc32(const uint8_t *data, size_t n) { return crc32_update(0, da
 //   0x0F QUERY : (empty), [slot] or [kind, slot]                             ack carries state; [slot] = that picture's crc; [3, slot] = that
 //                                                                            custom sound's crc (detail = its size in KB, 0 = none)
 //   0x11 RESET : (empty), [slot] or [kind, slot]                             delete the layout (pictures stay), one picture, or one custom sound
+//                                                                            [4, slot]: that GIF's crc (detail = KB); RESET [4, slot] deletes it
 //   0x14 PLAY  : [slot]                                                      play that sound slot now (custom copy, else the original, else a beep)
 // Board -> host 0x10 ACK: [cmd][status][detail][flags][seq u16 LE][free_kb u16 LE][crc32 u32 LE]  (payload 12 bytes)
 // ---------------------------------------------------------------------------------------------
@@ -196,6 +204,11 @@ class Storage {
   virtual void set_sound_crc(uint8_t slot, uint32_t crc) = 0;
   virtual bool sound_remove(uint8_t slot) = 0; // delete the custom copy only
   virtual bool sound_play(uint8_t slot) = 0; // play the slot the way the board would for its event
+  // GIFs (kind 4): /gif/<slot>.gif
+  virtual uint32_t gif_crc(uint8_t slot) = 0; // 0 if the slot is empty
+  virtual uint32_t gif_size(uint8_t slot) = 0;
+  virtual void set_gif_crc(uint8_t slot, uint32_t crc) = 0;
+  virtual bool gif_remove(uint8_t slot) = 0;
   // after a picture / album art is stored: can the board's own decoder read it? (firmware: LVGL SJPG/JPEG decode test)
   virtual bool picture_check(uint8_t kind, uint8_t slot) { (void)kind; (void)slot; return true; }
 };
