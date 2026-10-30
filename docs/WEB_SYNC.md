@@ -61,6 +61,13 @@ Spotify again once, and Spotify Premium).
 
 `node web-sync/test-layout.mjs` and `node web-sync/test-editor.mjs` test the layout code and the editor model.
 
+### GIF widget (upload kind 4, packets `0x0F` / `0x11` with `[4, slot]`)
+
+**+ GIF (animated)** in the builder asks for an animated GIF, WebP or PNG (or a photo), keeps the source in this browser (up to 250 KB
+in localStorage; bigger ones last until the page is closed) and shows it animated in the preview. **Send to board** converts it to at most
+128x128 and 60 KB (see `WIDGETS.md`, "GIF widget"), uploads it after the pictures and before the layout, and deletes GIF slots no widget
+uses. Needs Chrome (`ImageDecoder`) for animation; other browsers get the first frame only. `node web-sync/test-gifs.mjs` tests the encoder.
+
 ### Sounds (upload kind 3, packets `0x0F` / `0x11` with `[3, slot]`, `0x14`)
 
 The **Sounds** section (under the builder) lists the board's 15 sound slots: connected, disconnected, six weather sounds, pet tap,

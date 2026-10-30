@@ -6,7 +6,7 @@ board over USB; the firmware reads it and builds the screens.
 
 Status: **Phase 1** (layout engine + upload protocol), **Phase 2** (the builder on the web page) and **Phase 3** (typing cat, timers,
 buttons, Bluetooth keys, Spotify controls, pictures, album art, pets; see "Phase 3 widgets" below) are done. **Phase 4a** adds custom
-sounds (see "Custom sounds" below). Planned next: a GIF widget and a one-tap timer button.
+sounds (see "Custom sounds" below). **Phase 4b** adds the animated GIF widget ("GIF widget" below). Planned next: a one-tap timer button.
 
 ## Using the builder (web page)
 
@@ -114,12 +114,34 @@ The page asks the board (QUERY, `detail` = feature level) before sending; an old
 | `rm` | reminder | `k` 0 water, 1 stretch, 2 breathe; `p` every 5..240 min (30), `z` | beep, cat smiles, note; tap = done |
 | `pc` | picture | `i` slot 0..7 (required) | any size; the page crops and encodes your image to the box |
 | `pt` | pet | `n` species 0..17 (4 = cat) | fixed 160x132; tap to pet it. See "Pets" |
+| `gf` | animated GIF (feature level 4) | `i` GIF slot 0..3 (required) | plays at its own size (<= 128x128), centered in the box. See "GIF widget" |
 
 **Button actions** (`e`): 0 none, 1 cat taps, 2 cat happy, 3 cat sleepy, 4 toggle C/F, 5 mute, 6 brightness step, 7 next wallpaper,
 8 next page, 9 previous page, 10 pomodoro start/pause, 11 pomodoro reset, 12 focus sign, 13 stopwatch start/stop, 14 stopwatch reset,
 15-17 Spotify play-pause / next / previous (web page), 18 event to the page (`g` = number, packet `0x13`), 19 Bluetooth key
 (`g` = modifiers << 8 | HID usage; modifiers 1 Ctrl, 2 Shift, 4 Alt, 8 Cmd/Win), 20 Bluetooth media key (`g` 0 play/pause,
 1 next, 2 previous, 3 volume up, 4 volume down, 5 mute). Bluetooth actions need the Bluetooth build (below); otherwise they show a note.
+
+### GIF widget
+
+*Firmware feature level 4.* A `gf` widget plays an animated GIF stored in one of **4 GIF slots** (`/gif/<slot>.gif` in LittleFS). The builder's
+**+ GIF (animated)** asks for a file (animated GIF, animated WebP or PNG, or a plain photo: Chrome's `ImageDecoder` reads every frame),
+then on **Send** re-encodes it in the browser to what the board can hold: **at most 128x128** (the widget box, cropped to fill), every
+frame complete, one shared palette of up to 256 colors (median cut), at most **60,000 bytes** (the board takes 65,536). If it does
+not fit the page first uses fewer colors (128, 64, 32), then every 2nd, 3rd, 4th frame (delays are added up so the speed stays), then
+a smaller picture. A GIF the board already has (same crc) is not sent again; slots no widget uses are deleted.
+
+On the board the decoder is bitbank2's [AnimatedGIF](https://github.com/bitbank2/AnimatedGIF) (Apache-2.0), one decoder object and one
+RGB565 canvas per GIF on screen (about 24 KB + width x height x 2 bytes of heap; measured free heap with a 96x96 and a 128x128 GIF
+running was never below 150 KB). **At most two GIFs per page**; a third is shown as a "GIF" placeholder, as is an empty slot. Frames are
+decoded when their delay is up (never faster than 50 per second). Replacing or deleting a GIF that is on screen first closes its file.
+
+**What the board checks before it keeps a file** (the page uses the same header rules): `GIF87a` or `GIF89a`, canvas 1..128 x 1..128,
+the file ends with the `0x3B` trailer, at most 65,536 bytes; then it decodes every frame once with AnimatedGIF and refuses the file
+(`invalid layout`, detail 1, and the slot is emptied again) if the decoder reports an error. Upload kind 4, `QUERY [4, slot]` (crc and
+size in KB), `RESET [4, slot]`. Space is shared with the layout, pictures and sounds; the first GIF creates the `/gif` folder (8 KB).
+
+Flash: the library adds about 9.4 KB to every build; the standard build still has about 91 KB left.
 
 ### Custom sounds
 
@@ -227,12 +249,12 @@ packets `0x01`-`0x0A` are unchanged. Stop-and-wait: send one packet, wait for it
 
 | id | name | payload |
 |----|------|---------|
-| `0x0B` | BEGIN | `kind` (0 layout, 1 picture, 2 album art, 3 sound), `slot` (picture 0..7, sound 0..14), `schema version`, `total u32 LE`, `crc32 u32 LE` (11 bytes) |
+| `0x0B` | BEGIN | `kind` (0 layout, 1 picture, 2 album art, 3 sound, 4 GIF), `slot` (picture 0..7, sound 0..14, GIF 0..3), `schema version`, `total u32 LE`, `crc32 u32 LE` (11 bytes) |
 | `0x0C` | CHUNK | `seq u16 LE`, 1..192 data bytes. Chunk n holds bytes n*192 .. n*192+191; every chunk but the last is exactly 192 bytes |
 | `0x0D` | END | empty: verify, validate, commit |
 | `0x0E` | ABORT | empty: drop the upload in progress |
-| `0x0F` | QUERY | empty: report state, no side effects (`detail` = feature level, 3 since Phase 4a); `[slot]`: `crc32` of that picture; `[3, slot]`: `crc32` of that custom sound (0 = none) and its size in KB in `detail` |
-| `0x11` | RESET | empty: delete the stored layout, back to the built-in screens; `[slot]`: delete that picture; `[3, slot]`: delete the custom copy of that sound (the original file is never touched) |
+| `0x0F` | QUERY | empty: report state, no side effects (`detail` = feature level, 4 since Phase 4b); `[slot]`: `crc32` of that picture; `[3, slot]` / `[4, slot]`: `crc32` of that custom sound / GIF (0 = none) and its size in KB in `detail` |
+| `0x11` | RESET | empty: delete the stored layout, back to the built-in screens; `[slot]`: delete that picture; `[3, slot]`: delete the custom copy of that sound (the original file is never touched); `[4, slot]`: delete that GIF |
 | `0x14` | PLAY | `slot` 0..14: play that sound slot now, as the board would for its event (custom copy, else the original, else the built-in beep); acked with status 0 |
 | `0x12` | DATE (host to board) | `year-2000`, `month`, `day`, `weekday 0..6` |
 | `0x13` | EVENT (board to host) | `action`, `arg u16 LE`: a button the page acts on (Spotify, event); sent only while the page is the data source |
@@ -250,7 +272,8 @@ the stored layout's checksum (0 = none), `free_kb` the free space of the LittleF
 - **Verify**: after END, send QUERY: `crc32` must equal the checksum of what you sent.
 - Pictures (kind 1) are at most 65,536 bytes, album art (kind 2, kept in RAM, not flash) at most 12,288 bytes, sounds (kind 3) at most
   160,044 bytes (and at least 46: a header and one sample). A sound's END ack carries the crc the board read back from flash; a file
-  that is not a canonical mono 16-bit WAV in 8000-24000 Hz answers `invalid layout` with detail 0 and is not kept.
+  that is not a canonical mono 16-bit WAV in 8000-24000 Hz answers `invalid layout` with detail 0 and is not kept. GIFs (kind 4) are at most
+  65,536 bytes and 128x128.
 - Speed: about 3.9 KB/s (a 4 KB layout in about 1 s). Sending several chunks before waiting for acks was tried and lost bytes while the
   board writes to flash, so uploads stay stop-and-wait.
 - A BEGIN larger than 4096 bytes, an unknown version or kind, or too little free space is refused before anything is written.
@@ -264,6 +287,7 @@ The page code is in `web-sync/index.html` (`validateLayout`, `layoutBeginPacket`
 scripts/test-layout-core.sh          # firmware parser + upload state machine on the host (g++, ASan/UBSan, mutation fuzz)
 node web-sync/test-layout.mjs        # page validator (same shared cases), packets, ack decoding, upload driver
 node web-sync/test-packets.mjs       # existing packets, unchanged
+node web-sync/test-gifs.mjs          # GIFs: encoder checked by an independent decoder, quantizer, size budgeting, gifCheck
 node web-sync/test-sounds.mjs        # sounds: WAV encode/check, resampling, trim/normalize/fade, free-space maths, upload driver
 ~/.venvs/pio39/bin/python scripts/layout_smoke_test.py   # real board over USB (quit the desktop app first); ends with RESET
 ~/.venvs/pio39/bin/python scripts/layout_tool.py upload docs/layout-example.json
@@ -271,7 +295,7 @@ node web-sync/test-sounds.mjs        # sounds: WAV encode/check, resampling, tri
 ~/.venvs/pio39/bin/python scripts/layout_tool.py sound clip.wav --slot 9 | soundreset --slot 9 | play --slot 9
 ```
 
-`sketch/test/host/layout-cases.tsv` is a table of 122 layouts with the expected verdict; the firmware parser and the page validator must
+`sketch/test/host/layout-cases.tsv` is a table of 128 layouts with the expected verdict; the firmware parser and the page validator must
 both agree with every row.
 
 ## Measured size (build flags `-DINVERT_COLORS_DEFAULT=1`)

@@ -8,6 +8,8 @@
   layout_tool.py sound FILE.wav --slot N      upload a custom sound (canonical mono 16-bit WAV, <= 5 s) into sound slot 0..14
   layout_tool.py soundreset --slot N          delete only the custom copy of sound slot N (originals stay)
   layout_tool.py play --slot N                play sound slot N on the board
+  layout_tool.py gif FILE.gif --slot N        upload an animated GIF (<= 128x128, <= 64 KB) into GIF slot 0..3
+  layout_tool.py gifreset --slot N            delete the GIF in slot N
 
 The normal way to do this is the web page; this exists for tests and for debugging without a browser.
 Quit the TapTapPaw desktop app first: only one program can hold the serial port.
@@ -197,6 +199,13 @@ class Board:
         """QUERY [3, slot]: crc of that custom sound (0 = none), detail = its size in KB."""
         return self.call(pkt(0x0F, bytes([3, slot])), 0x0F)
 
+    def gif_crc(self, slot):
+        """QUERY [4, slot]: crc of that GIF (0 = none), detail = its size in KB."""
+        return self.call(pkt(0x0F, bytes([4, slot])), 0x0F)
+
+    def remove_gif(self, slot):
+        return self.call(pkt(0x11, bytes([4, slot])), 0x11)
+
     def remove_sound(self, slot):
         """RESET [3, slot]: delete the custom copy only; the original sound file is not touched."""
         return self.call(pkt(0x11, bytes([3, slot])), 0x11)
@@ -231,7 +240,7 @@ class Board:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["info", "upload", "reset", "picture", "sound", "soundreset", "play"])
+    ap.add_argument("cmd", choices=["info", "upload", "reset", "picture", "sound", "soundreset", "play", "gif", "gifreset"])
     ap.add_argument("--slot", type=int, default=0, help="picture slot 0..7 (picture), sound slot 0..14 (sound, soundreset, play)")
     ap.add_argument("file", nargs="?")
     ap.add_argument("--port")
@@ -246,6 +255,12 @@ def main():
             ok, a = b.upload_kind(open(args.file, "rb").read(), 3, args.slot, end_timeout=8.0)
             print(("OK: " if ok else "FAILED: ") + repr(a))
             sys.exit(0 if ok else 1)
+        elif args.cmd == "gif":
+            ok, a = b.upload_kind(open(args.file, "rb").read(), 4, args.slot, end_timeout=8.0)
+            print(("OK: " if ok else "FAILED: ") + repr(a))
+            sys.exit(0 if ok else 1)
+        elif args.cmd == "gifreset":
+            print(b.remove_gif(args.slot))
         elif args.cmd == "soundreset":
             print(b.remove_sound(args.slot))
         elif args.cmd == "play":

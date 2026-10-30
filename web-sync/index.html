@@ -318,9 +318,9 @@ const LAYOUT = { VERSION: 1, MAX_BYTES: 4096, MAX_PAGES: 6, MAX_WIDGETS_PAGE: 12
 const LAYOUT_ERRORS = ['ok', 'empty', 'too big', 'syntax error', 'nested too deep', 'unsupported version', 'no pages', 'too many pages', 'bad page',
   'second main page', 'too many widgets', 'unknown widget type', 'widget outside the 240x320 screen', 'bad color', 'value out of range',
   'bad text', 'text pool full', 'trailing data'];
-const WIDGET_TYPES = ['', 'ac', 'dc', 'wx', 'np', 'sb', 'tc', 'tx', 'mc', 'sh', 'sl', 'ct', 'pm', 'cd', 'sw', 'dt', 'fs', 'bt', 'sp', 'aa', 'rm', 'pc', 'pt'];
+const WIDGET_TYPES = ['', 'ac', 'dc', 'wx', 'np', 'sb', 'tc', 'tx', 'mc', 'sh', 'sl', 'ct', 'pm', 'cd', 'sw', 'dt', 'fs', 'bt', 'sp', 'aa', 'rm', 'pc', 'pt', 'gf'];
 // firmware feature level each widget type needs (QUERY ack detail; firmware before Phase 3 answers 0)
-const WIDGET_LEVEL = { ct: 2, pm: 2, cd: 2, sw: 2, dt: 2, fs: 2, bt: 2, sp: 2, aa: 2, rm: 2, pc: 2, pt: 2 };
+const WIDGET_LEVEL = { ct: 2, pm: 2, cd: 2, sw: 2, dt: 2, fs: 2, bt: 2, sp: 2, aa: 2, rm: 2, pc: 2, pt: 2, gf: 4 };
 // button actions, same order as BtnAction in sketch/src/layout_core.h. arg: what "g" means. ble: needs the Bluetooth keyboard build.
 const BTN_ACTIONS = [
   { name: 'None' }, { name: 'Cat taps (+1 tap)' }, { name: 'Cat happy' }, { name: 'Cat sleepy' }, { name: 'Toggle C/F' }, { name: 'Mute / unmute' },
@@ -470,6 +470,7 @@ function checkWidget(w, st) {
   if (t === 'rm' && (p !== null && (p < 5 || p > 240))) return 'value out of range';
   if (t === 'bt') { if (ev === null || ev >= BTN_ACTIONS.length) return 'value out of range'; if (text === null || text.length === 0) return 'bad text'; }
   if (t === 'pc' && slot === null) return 'value out of range';
+  if (t === 'gf' && (slot === null || slot >= GIFS.SLOTS)) return 'value out of range';
   if ((t === 'bt' || t === 'fs' || t === 'cd') && text) {
     const n = utf8(text).length;
     if (st.text + n + 1 > LAYOUT.MAX_TEXT_POOL) return 'text pool full';
@@ -550,7 +551,7 @@ function parseLayoutAck(u) {
 }
 
 // Upload driver: stop-and-wait with retry and resume. io = { send(u8), ack(cmd, ms) -> Promise<ack|null>, onProgress?(done,total) }
-// opts.kind / opts.slot: 0 layout (default), 1 picture into slot 0..7, 2 album art, 3 custom sound into slot 0..14. One chunk in flight: measured on the board,
+// opts.kind / opts.slot: 0 layout (default), 1 picture into slot 0..7, 2 album art, 3 custom sound into slot 0..14, 4 GIF into slot 0..3. One chunk in flight: measured on the board,
 // more than one loses bytes while it writes flash (the end checksum catches it, but the upload fails).
 async function uploadLayoutBytes(bytes, io, opts = {}) {
   const tries = opts.tries || 3, ms = opts.timeoutMs || 1500, kind = opts.kind || 0, slot = opts.slot || 0;
@@ -573,10 +574,11 @@ async function uploadLayoutBytes(bytes, io, opts = {}) {
   a = await call(layoutEndPacket(), 0x0D, kind ? 6000 : ms); // pictures: the board test-decodes before it answers
   if (!a || a.status !== 0) {
     if (a && kind === 3 && a.status === 8) return { ok: false, stage: 'end', ack: a, message: 'the board refused this sound: it is not a mono 16-bit WAV it can play' };
+    if (a && kind === 4 && a.status === 8) return { ok: false, stage: 'end', ack: a, message: 'the board cannot decode this GIF' };
     if (a && kind && a.status === 8) return { ok: false, stage: 'end', ack: a, message: 'the board cannot decode this picture' };
     return fail('end', a);
   }
-  if (kind) return a.crc === crc32(bytes) ? { ok: true, ack: a, message: (kind === 3 ? 'sound' : 'picture') + ' stored and verified' } : { ok: false, stage: 'verify', ack: a, message: 'verify: checksum read back from the board does not match' };
+  if (kind) return a.crc === crc32(bytes) ? { ok: true, ack: a, message: (kind === 3 ? 'sound' : kind === 4 ? 'GIF' : 'picture') + ' stored and verified' } : { ok: false, stage: 'verify', ack: a, message: 'verify: checksum read back from the board does not match' };
   const q = await call(layoutQueryPacket(), 0x0F); // verify: the board reports the crc of the layout it stored
   if (!q || q.crc !== crc32(bytes)) return { ok: false, stage: 'verify', ack: q, message: 'verify: checksum read back from the board does not match' };
   return { ok: true, ack: q, message: 'layout stored and verified' };
@@ -606,7 +608,8 @@ const WIDGET_DEFS = {
   rm: { name: 'Reminder', w: 180, h: 32, o: ['k', 'p', 'z'], def: { p: 30 } },
   pc: { name: 'Picture', w: 96, h: 96, o: ['pic'] }, // your image, encoded at the widget's size when sent
   aa: { name: 'Album art', w: 96, h: 96, fixed: true, o: [] }, // current Spotify cover, sent by this page
-  pt: { name: 'Pet', w: 160, h: 132, fixed: true, o: ['n'], def: { n: 4 } }, // ASCII pets from claude-desktop-buddy (MIT)
+  pt: { name: 'Pet', w: 160, h: 132, fixed: true, o: ['n'], def: { n: 4 } },
+  gf: { name: 'GIF (animated)', w: 96, h: 96, o: ['gif'] }, // your GIF, re-encoded to at most 128x128 and 60 KB when sent // ASCII pets from claude-desktop-buddy (MIT)
 };
 // what the tappable widgets do on the board, shown in the property panel
 const WIDGET_HINT = {
@@ -618,6 +621,7 @@ const WIDGET_HINT = {
   sp: 'Previous / play-pause / next. Needs the web page connected and signed in to Spotify (Premium).',
   pc: 'Resize freely: the picture is cropped to fill the box and converted when you press Send. Each picture uses one of the board\'s 8 picture slots.',
   aa: 'Shows the cover of what Spotify is playing. This page sends it when the track changes (signed in to Spotify, page connected).',
+  gf: 'Plays an animated GIF (also animated WebP or PNG, or a photo). The page shrinks it to fit the board: at most 128x128 and 60 KB, fewer colors or frames if needed, centered in this box. Each GIF uses one of 4 GIF slots. Needs firmware feature level 4.',
   pt: 'Tap to pet it (hearts). It gets busy while you type, cheers when a pomodoro ends and waves at reminders. Pets by Anthropic\'s claude-desktop-buddy (MIT).',
   ct: 'Taps along with the board keys, button widgets, the desktop app and Bluetooth keys. Blinks, falls asleep, chases the mouse paw.',
 };
@@ -977,6 +981,99 @@ function prepareSound(mono, rate, o = {}) {
 }
 const soundBytesFit = (bytes, freeKb) => bytes / 1024 <= freeKb - SND.SPARE_KB; // the board keeps 8 KB spare; a replaced copy stays until the new one is whole
 function soundFitSeconds(freeKb, rate) { return Math.max(0, Math.min(SND.MAX_SECONDS, ((freeKb - SND.SPARE_KB) * 1024 - SND.HEADER) / (2 * rate))); }
+
+// ---- animated GIFs (upload kind 4: a GIF in one of 4 board slots). Pure functions, unit-tested in test-gifs.mjs ----
+// The page re-encodes whatever you choose (GIF, animated WebP/PNG, a photo) to a small GIF the board can play: at most 128x128, every frame
+// complete (no transparency tricks), one shared palette of up to 256 colors, and at most 60,000 bytes (the board takes 65,536).
+const GIFS = { SLOTS: 4, MAX_SIDE: 128, MAX_BYTES: 65536, BUDGET: 60000, MAX_FRAMES: 60 };
+// Mirrors gif_check() in layout_core.cpp: "GIF87a"/"GIF89a", canvas 1..128 square-ish, ends with the 0x3B trailer.
+function gifCheck(u) {
+  if (!u || u.length < 14 || u.length > GIFS.MAX_BYTES) return { ok: false, why: 'size' };
+  const sig = String.fromCharCode(...u.subarray(0, 6));
+  if (sig !== 'GIF87a' && sig !== 'GIF89a') return { ok: false, why: 'not a GIF' };
+  const w = u[6] | (u[7] << 8), h = u[8] | (u[9] << 8);
+  if (w < 1 || w > GIFS.MAX_SIDE || h < 1 || h > GIFS.MAX_SIDE) return { ok: false, why: 'canvas must be 1..128 px each way' };
+  if (u[u.length - 1] !== 0x3B) return { ok: false, why: 'no GIF trailer' };
+  return { ok: true, w, h };
+}
+function gifLzw(idx, minCode) { // GIF flavour of LZW (same scheme as omggif)
+  const clear = 1 << minCode, eoi = clear + 1, out = [];
+  let size = minCode + 1, next = eoi + 1, cur = 0, shift = 0, table = new Map();
+  const emit = (code) => { cur |= code << shift; shift += size; while (shift >= 8) { out.push(cur & 255); cur >>>= 8; shift -= 8; } };
+  emit(clear);
+  let prefix = idx[0];
+  for (let i = 1; i < idx.length; i++) {
+    const k = idx[i], key = (prefix << 8) | k, hit = table.get(key);
+    if (hit !== undefined) { prefix = hit; continue; }
+    emit(prefix);
+    if (next === 4096) { emit(clear); table = new Map(); next = eoi + 1; size = minCode + 1; }
+    else { if (next >= (1 << size)) size++; table.set(key, next++); }
+    prefix = k;
+  }
+  emit(prefix); emit(eoi);
+  if (shift > 0) out.push(cur & 255);
+  return out;
+}
+// palette: Uint8Array of n*3 (n <= 256); frames: Uint8Array[] of w*h palette indices; delaysCs: centiseconds per frame
+function gifEncode(w, h, palette, frames, delaysCs) {
+  const n = palette.length / 3; let bits = 1; while ((1 << bits) < n) bits++;
+  const out = [...'GIF89a'].map((c) => c.charCodeAt(0));
+  out.push(w & 255, w >> 8, h & 255, h >> 8, 0x80 | 0x70 | (bits - 1), 0, 0);
+  for (let i = 0; i < (1 << bits) * 3; i++) out.push(i < palette.length ? palette[i] : 0);
+  if (frames.length > 1) out.push(0x21, 0xFF, 11, ...[...'NETSCAPE2.0'].map((c) => c.charCodeAt(0)), 3, 1, 0, 0, 0);
+  const minCode = Math.max(2, bits);
+  frames.forEach((f, fi) => {
+    const d = Math.max(2, Math.round(delaysCs[fi] || 10));
+    out.push(0x21, 0xF9, 4, 0x04, d & 255, d >> 8, 0, 0); // disposal 1 (leave in place), no transparency
+    out.push(0x2C, 0, 0, 0, 0, w & 255, w >> 8, h & 255, h >> 8, 0, minCode);
+    const data = gifLzw(f, minCode);
+    for (let i = 0; i < data.length; i += 255) { const c = data.slice(i, i + 255); out.push(c.length, ...c); }
+    out.push(0);
+  });
+  out.push(0x3B);
+  return Uint8Array.from(out);
+}
+// Median-cut palette over RGBA pixels of all frames (sampled), then each pixel to its nearest palette entry (cached per 5-bit color).
+function gifQuantize(rgbaFrames, w, h, ncolors) {
+  const total = rgbaFrames.length * w * h, stride = Math.max(1, Math.floor(total / 30000)), pts = [];
+  for (let f = 0, c = 0; f < rgbaFrames.length; f++) for (let i = 0; i < w * h; i++, c++) if (c % stride === 0) { const p = rgbaFrames[f], o = i * 4; pts.push([p[o], p[o + 1], p[o + 2]]); }
+  let boxes = [pts];
+  while (boxes.length < ncolors) {
+    let bi = -1, best = 0, ch = 0;
+    boxes.forEach((b, i) => { if (b.length < 2) return; for (let c = 0; c < 3; c++) { let lo = 255, hi = 0; for (const p of b) { if (p[c] < lo) lo = p[c]; if (p[c] > hi) hi = p[c]; } if (hi - lo > best) { best = hi - lo; bi = i; ch = c; } } });
+    if (bi < 0) break;
+    const b = boxes[bi].sort((a, z) => a[ch] - z[ch]), m = b.length >> 1;
+    boxes.splice(bi, 1, b.slice(0, m), b.slice(m));
+  }
+  const pal = new Uint8Array(boxes.length * 3);
+  boxes.forEach((b, i) => { for (let c = 0; c < 3; c++) pal[i * 3 + c] = Math.round(b.reduce((s, p) => s + p[c], 0) / Math.max(1, b.length)); });
+  const cache = new Int16Array(32768).fill(-1), n = boxes.length;
+  const frames = rgbaFrames.map((p) => {
+    const o = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const r = p[i * 4], g = p[i * 4 + 1], b = p[i * 4 + 2], key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+      let v = cache[key];
+      if (v < 0) { let bd = 1e9; for (let j = 0; j < n; j++) { const dr = r - pal[j * 3], dg = g - pal[j * 3 + 1], db = b - pal[j * 3 + 2], d = dr * dr + dg * dg + db * db; if (d < bd) { bd = d; v = j; } } cache[key] = v; }
+      o[i] = v;
+    }
+    return o;
+  });
+  return { palette: pal, frames };
+}
+// Smallest-effort encode that fits `budget` bytes: all frames at 256 colors first, then fewer colors, then every 2nd/3rd/4th frame.
+// rgbaFrames: Uint8ClampedArray[] (w*h*4), delaysMs per frame. Returns { bytes, colors, step, frames } or null when nothing fits.
+function gifFit(rgbaFrames, w, h, delaysMs, budget = GIFS.BUDGET) {
+  const steps = rgbaFrames.length > 1 ? [1, 2, 3, 4, 6] : [1];
+  for (const step of steps) {
+    const fr = [], dl = [];
+    for (let i = 0; i < rgbaFrames.length; i += step) { fr.push(rgbaFrames[i]); let d = 0; for (let j = i; j < Math.min(rgbaFrames.length, i + step); j++) d += delaysMs[j] || 100; dl.push(d / 10); }
+    for (const colors of [256, 128, 64, 32]) {
+      const q = gifQuantize(fr, w, h, colors), bytes = gifEncode(w, h, q.palette, q.frames, dl);
+      if (bytes.length <= budget) return { bytes, colors: q.palette.length / 3, step, frames: fr.length };
+    }
+  }
+  return null;
+}
 
 // ---- UI ---- (everything below needs a browser; the packet code above is unit-tested in test-packets.mjs)
 if (!window.__ttpReturn) { // the Spotify sign-in popup only runs the small script in <head>
@@ -1352,6 +1449,10 @@ function drawWidget(w, s, box) {
       const l = el('pre', 'margin:0;position:absolute;left:0;right:0;top:28px;text-align:center;font:bold 16px/16px ui-monospace,Menlo,monospace;color:' + q.c, box);
       l.textContent = q.l.join('\n'); break;
     }
+    case 'gf':
+      box.style.background = gifSrc[w.i] ? 'url(' + gifSrc[w.i].url + ') center/contain no-repeat' : 'rgba(0,0,0,.31)';
+      if (!gifSrc[w.i]) { box.style.cssText += ';display:flex;align-items:center;justify-content:center;color:#A99BB3;font:12px system-ui'; box.textContent = 'no GIF'; }
+      break;
     case 'pc':
       box.style.background = pics[w.i] ? 'url(' + pics[w.i].orig + ') center/cover no-repeat' : 'rgba(0,0,0,.31)';
       if (!pics[w.i]) { box.style.cssText += ';display:flex;align-items:center;justify-content:center;color:#A99BB3;font:12px system-ui'; box.textContent = 'no picture'; }
@@ -1503,6 +1604,7 @@ function renderProps(force) {
     if (k === 'p' && w.t === 'cd') h += opt('Count to', '<input type="time" id="pTime" value="' + two(Math.floor((w.p | 0) / 60)) + ':' + two((w.p | 0) % 60) + '">');
     else if (k === 'p') h += opt(w.t === 'pm' ? 'Focus (min)' : 'Every (min)', '<input type="number" data-k="p" min="' + (w.t === 'pm' ? 1 : 5) + '" max="' + (w.t === 'pm' ? 180 : 240) + '">');
     if (k === 'b') h += opt('Break (min)', '<input type="number" data-k="b" min="1" max="60">');
+    if (k === 'gif') h += '<div class="row"><button class="ghost" id="pGif">' + (gifSrc[w.i] ? 'Choose another GIF' : 'Choose a GIF') + '</button> <span class="mute">' + gifLabel(w.i) + '</span></div>';
     if (k === 'pic') h += '<div class="row"><button class="ghost" id="pPic">' + (pics[w.i] ? 'Choose another picture' : 'Choose a picture') + '</button> <span class="mute">' + picLabel(w.i) + '</span></div>';
     if (k === 'e') {
       h += opt('Action', '<select data-k="e">' + BTN_ACTIONS.map((a, i) => '<option value="' + i + '">' + a.name + (a.ble ? ' (Bluetooth build)' : a.page ? ' (web page)' : '') + '</option>').join('') + '</select>');
@@ -1544,6 +1646,7 @@ function renderProps(force) {
     else if (k === 'n') i.onchange = () => { ed.begin(); ed.setProp(selId, 'n', +i.value); ed.end(); renderProps(true); };
     else i.onchange = () => { ed.begin(); ed.setProp(selId, k, +i.value); ed.end(); };
   });
+  if ($('pGif')) $('pGif').onclick = () => pickGif((slot) => { ed.begin(); ed.setProp(selId, 'i', slot); ed.end(); renderProps(true); renderStage(); }, null, w.i);
   if ($('pPic')) $('pPic').onclick = () => pickPicture((slot) => { ed.begin(); ed.setProp(selId, 'i', slot); ed.end(); renderProps(true); }, null, w.i);
   if ($('pTime')) $('pTime').onchange = (e) => { const [hh, mm] = e.target.value.split(':').map(Number); if (isFinite(hh) && isFinite(mm)) { ed.begin(); ed.setProp(selId, 'p', hh * 60 + mm); ed.end(); } };
   const setHid = () => { let g = +$('hidKey').value; box.querySelectorAll('.hidMod').forEach((c) => { if (c.checked) g |= (+c.value) << 8; }); ed.begin(); ed.setProp(selId, 'g', g); ed.end(); renderProps(true); };
@@ -1557,6 +1660,7 @@ function dupSel() {
   if (!selId) return;
   const src = ed.find(selId).w;
   let slot = null;
+  if (src.t === 'gf') { slot = freeGifSlot(); if (slot === null) { flash('all 4 GIF slots are in use'); return; } if (gifSrc[src.i]) { gifSrc[slot] = { name: gifSrc[src.i].name, type: gifSrc[src.i].type, buf: gifSrc[src.i].buf, url: gifSrc[src.i].url }; saveGifs(); } }
   if (src.t === 'pc') { slot = freeSlot(); if (slot === null) { flash('all 8 picture slots are in use'); return; } if (pics[src.i]) { pics[slot] = { name: pics[src.i].name, orig: pics[src.i].orig }; savePics(); } }
   const r = ed.duplicate(selId);
   if (!r.ok) { flash(r.why); return; }
@@ -1572,6 +1676,10 @@ function renderPalette() {
     const b = el('button', '', p); b.textContent = '+ ' + WIDGET_DEFS[t].name; b.disabled = main;
     b.title = main ? 'The original screen page cannot hold widgets: pick or add another page' : 'Add to page ' + (curPage + 1);
     b.onclick = () => {
+      if (t === 'gf') { // pick the GIF first, then place the widget with its slot
+        pickGif((slot) => { const r = ed.addWidget(curPage, 'gf'); if (!r.ok) { flash(r.why); return; } ed.begin(); ed.setProp(r.id, 'i', slot); ed.end(); selId = r.id; renderAll(); });
+        return;
+      }
       if (t === 'pc') { // pick the image first, then place the widget with its slot
         pickPicture((slot) => { const r = ed.addWidget(curPage, 'pc'); if (!r.ok) { flash(r.why); return; } ed.begin(); ed.setProp(r.id, 'i', slot); ed.end(); selId = r.id; renderAll(); });
         return;
@@ -1821,15 +1929,15 @@ function waitAck(cmd, ms) {
   });
 }
 // Dry run: a small simulated board, so the whole upload can be watched (and tried) without hardware
-const sim = { open: false, total: 0, crc: 0, data: [], stored: null, storedCrc: 0, kind: 0, slot: 0, pics: {}, snds: {}, used: 0, played: -1 };
+const sim = { open: false, total: 0, crc: 0, data: [], stored: null, storedCrc: 0, kind: 0, slot: 0, pics: {}, snds: {}, gifs: {}, used: 0, played: -1 };
 function simHandle(u) {
   const id = u[1], p = Array.from(u.subarray(3));
   const mk = (status, detail = 0) => ({ cmd: id, status, statusName: LAYOUT_STATUS[status], detail, detailName: status === 8 ? LAYOUT_ERRORS[detail] : '',
     active: !!sim.stored, stored: !!sim.stored, safeMode: false, sessionOpen: sim.open, seq: Math.ceil(sim.data.length / LAYOUT.CHUNK),
-    freeKb: 200 - Math.ceil(Object.values(sim.pics).concat(Object.values(sim.snds)).reduce((n, b) => n + b.length, 0) / 1024), crc: sim.storedCrc });
+    freeKb: 200 - Math.ceil(Object.values(sim.pics).concat(Object.values(sim.snds), Object.values(sim.gifs)).reduce((n, b) => n + b.length, 0) / 1024), crc: sim.storedCrc });
   if (id === 0x0B) {
     const t = p[3] | (p[4] << 8) | (p[5] << 16), c = (p[7] | (p[8] << 8) | (p[9] << 16) | (p[10] << 24)) >>> 0;
-    if (p[0] > 3 || (p[0] === 1 && p[1] >= PIC.SLOTS) || (p[0] === 3 && (p[1] >= SND.SLOTS || t < SND.HEADER + 2))) return mk(1);
+    if (p[0] > 4 || (p[0] === 4 && (p[1] >= GIFS.SLOTS || t < 14)) || (p[0] === 1 && p[1] >= PIC.SLOTS) || (p[0] === 3 && (p[1] >= SND.SLOTS || t < SND.HEADER + 2))) return mk(1);
     if (p[0] === 3 && t > SND.MAX_BYTES) return mk(3);
     if (!(sim.open && sim.total === t && sim.crc === c && sim.kind === p[0] && sim.slot === p[1])) Object.assign(sim, { open: true, total: t, crc: c, data: [], kind: p[0], slot: p[1] });
     return mk(0);
@@ -1849,18 +1957,21 @@ function simHandle(u) {
     if (crc32(bytes) !== sim.crc) return mk(4);
     if (sim.kind === 1) { if (!sjpgInfo(bytes)) return mk(8, 1); sim.pics[sim.slot] = bytes; return Object.assign(mk(0), { crc: sim.crc }); }
     if (sim.kind === 2) { if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return mk(8, 1); return Object.assign(mk(0), { crc: sim.crc }); }
+    if (sim.kind === 4) { if (!gifCheck(bytes).ok) return mk(8, 0); sim.gifs[sim.slot] = bytes; return Object.assign(mk(0), { crc: sim.crc }); }
     if (sim.kind === 3) { if (!wavCheck(bytes).ok) return mk(8, 0); sim.snds[sim.slot] = bytes; return Object.assign(mk(0), { crc: sim.crc }); }
     const v = validateLayout(new TextDecoder().decode(bytes));
     if (!v.ok) return mk(8, v.code);
     sim.stored = bytes; sim.storedCrc = sim.crc; return mk(0);
   }
   if (id === 0x0E) { sim.open = false; sim.data = []; return mk(0); }
+  if (id === 0x11 && p.length === 2 && p[0] === 4) { if (p[1] >= GIFS.SLOTS) return mk(1); delete sim.gifs[p[1]]; return Object.assign(mk(0), { crc: 0 }); }
   if (id === 0x11 && p.length === 2 && p[0] === 3) { if (p[1] >= SND.SLOTS) return mk(1); delete sim.snds[p[1]]; return Object.assign(mk(0), { crc: 0 }); }
   if (id === 0x11 && p.length === 1) { delete sim.pics[p[0]]; return Object.assign(mk(0), { crc: 0 }); }
   if (id === 0x11) { sim.stored = null; sim.storedCrc = 0; return mk(0); }
+  if (id === 0x0F && p.length === 2 && p[0] === 4) return p[1] >= GIFS.SLOTS ? mk(1) : Object.assign(mk(0, sim.gifs[p[1]] ? Math.ceil(sim.gifs[p[1]].length / 1024) : 0), { crc: sim.gifs[p[1]] ? crc32(sim.gifs[p[1]]) : 0 });
   if (id === 0x0F && p.length === 2 && p[0] === 3) return p[1] >= SND.SLOTS ? mk(1) : Object.assign(mk(0, sim.snds[p[1]] ? Math.ceil(sim.snds[p[1]].length / 1024) : 0), { crc: sim.snds[p[1]] ? crc32(sim.snds[p[1]]) : 0 });
   if (id === 0x0F && p.length === 1) return Object.assign(mk(0, 2), { crc: sim.pics[p[0]] ? crc32(sim.pics[p[0]]) : 0 });
-  if (id === 0x0F) return mk(0, 3); // feature level 3
+  if (id === 0x0F) return mk(0, 4); // feature level 4
   if (id === 0x14) { if (p.length !== 1 || p[0] >= SND.SLOTS) return mk(1); sim.played = p[0]; return mk(0); }
   return mk(0);
 }
@@ -1893,6 +2004,7 @@ $('bSend').onclick = async () => {
     io.send(layoutQueryPacket()); const q = await io.ack(0x0F, 1500);
     if (!q) { setSend(ackText(null), 'bad'); return; }
     if (!(q.flags & 64) && ed.toLayout().pg.some((pg) => (pg.w || []).some((x) => x.t === 'pt' && PET_PREVIEW[x.n | 0] && PET_PREVIEW[x.n | 0].all))) log('note: this firmware carries 6 pets; the others show the cat (WiFi / Bluetooth builds carry all 18)');
+    boardLevel = q.detail;
     if (q.detail < need) { setSend('This layout uses widgets the board firmware does not have yet (' + newWidgetNames(ed.toLayout(), q.detail) + '). Flash the newer firmware first.', 'bad'); return; }
   }
   sending = true; renderMeter(); $('bProg').hidden = false; $('bProg').value = 0;
@@ -1902,6 +2014,11 @@ $('bSend').onclick = async () => {
     if (picturesUsed(ed.toLayout()).size || need > 0) { // pictures first, so the layout never points at a missing one for long
       const pr = await syncPictures(ed.toLayout(), boardIo(), (msg, f) => { setSend(msg); if (f !== undefined) $('bProg').value = f; });
       if (!pr.ok) { setSend('Not sent: ' + pr.message + '. The board keeps its previous layout.', 'bad'); sending = false; renderMeter(); return; }
+      $('bProg').value = 0;
+    }
+    if (gifsUsed(ed.toLayout()).size || boardLevel >= 4) { // GIFs next, same idea as the pictures
+      const gr = await syncGifs(ed.toLayout(), boardIo(), (msg, f) => { setSend(msg); if (f !== undefined) $('bProg').value = f; });
+      if (!gr.ok) { setSend('Not sent: ' + gr.message + '. The board keeps its previous layout.', 'bad'); sending = false; renderMeter(); return; }
       $('bProg').value = 0;
     }
     const io = Object.assign(boardIo(), { onProgress: (d, t) => { $('bProg').value = d / t; setSend('sending: chunk ' + d + ' of ' + t); } });
@@ -2123,7 +2240,92 @@ async function resetSound(slot) {
 }
 $('sndCheck').onclick = () => sndCheckBoard();
 $('sndSendAll').onclick = async () => { for (let i = 0; i < SND.SLOTS; i++) if (snd[i].bytes && snd[i].pending) { if (!(await sendSound(i))) break; } };
-Object.assign(window.ttpDebug, { snd, boardSnd, sendSound, sndCheckBoard, sndOpenEditor, sndEditUpdate, resetSound, playOnBoard, get sndMeta() { return sndMeta; } });
+// ---- GIFs: kept in this browser (localStorage "ttp_gifs", sources up to 250 KB), re-encoded for the board when sent ----
+const gifSrc = {}; // slot -> { name, type, buf: Uint8Array, url, enc: { w, h, bytes, frames, colors } }
+let boardLevel = 0; // feature level the board reported on the last Send
+try { const o = JSON.parse(load('gifs') || '{}') || {}; for (const k of Object.keys(o)) { const buf = Uint8Array.from(atob(o[k].b64), (c) => c.charCodeAt(0)); gifSrc[k] = { name: o[k].name, type: o[k].type, buf, url: 'data:' + o[k].type + ';base64,' + o[k].b64 }; } } catch (e) { /* nothing kept */ }
+function saveGifs() {
+  const o = {};
+  for (const k of Object.keys(gifSrc)) { const g = gifSrc[k]; if (g.buf.length > 250 * 1024) continue; let bin = ''; for (let i = 0; i < g.buf.length; i += 8192) bin += String.fromCharCode.apply(null, g.buf.subarray(i, i + 8192)); o[k] = { name: g.name, type: g.type, b64: btoa(bin) }; }
+  try { localStorage.setItem('ttp_gifs', JSON.stringify(o)); } catch (e) { flash('the browser has no room left to keep GIFs'); }
+}
+function gifsUsed(lay) { const m = new Map(); for (const p of lay.pg) for (const w of (p.w || [])) if (w.t === 'gf') m.set(w.i, { w: Math.min(w.w, GIFS.MAX_SIDE), h: Math.min(w.h, GIFS.MAX_SIDE) }); return m; }
+function freeGifSlot(except) {
+  const used = gifsUsed(ed.toLayout());
+  for (let i = 0; i < GIFS.SLOTS; i++) if (!used.has(i) && !gifSrc[i]) return i;
+  for (let i = 0; i < GIFS.SLOTS; i++) if (!used.has(i) && i !== except) { delete gifSrc[i]; return i; }
+  return null;
+}
+function gifLabel(slot) { const g = gifSrc[slot]; return g ? esc(g.name) + (g.enc ? ', ' + g.enc.w + 'x' + g.enc.h + ', ' + g.enc.frames + ' frame' + (g.enc.frames === 1 ? '' : 's') + ', ' + Math.ceil(g.enc.bytes.length / 1024) + ' KB on the board' : '') : 'none chosen'; }
+// every frame of the source (up to 60), cover-cropped to w x h, as RGBA; ImageDecoder reads animated GIF / WebP / PNG in Chrome
+async function gifFrames(g, w, h) {
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h; const cx = cv.getContext('2d', { willReadFrequently: true });
+  const grab = (img, iw, ih) => { cx.fillStyle = '#000'; cx.fillRect(0, 0, w, h); const sc = Math.max(w / iw, h / ih); cx.imageSmoothingQuality = 'high'; cx.drawImage(img, (w - iw * sc) / 2, (h - ih * sc) / 2, iw * sc, ih * sc); return Uint8ClampedArray.from(cx.getImageData(0, 0, w, h).data); };
+  const frames = [], delays = [];
+  if (window.ImageDecoder && (await ImageDecoder.isTypeSupported(g.type))) {
+    const dec = new ImageDecoder({ data: g.buf, type: g.type }); await dec.tracks.ready;
+    const n = dec.tracks.selectedTrack.frameCount, pick = n <= GIFS.MAX_FRAMES ? [...Array(n).keys()] : Array.from({ length: GIFS.MAX_FRAMES }, (_, i) => Math.floor(i * n / GIFS.MAX_FRAMES));
+    for (const idx of pick) { const { image } = await dec.decode({ frameIndex: idx }); frames.push(grab(image, image.displayWidth, image.displayHeight)); delays.push(((image.duration || 100000) / 1000) * (n / pick.length)); image.close(); }
+    dec.close();
+  } else { const bmp = await createImageBitmap(new Blob([g.buf], { type: g.type })); frames.push(grab(bmp, bmp.width, bmp.height)); delays.push(100); }
+  return { frames, delays };
+}
+async function encodeGif(slot, w, h) { // bytes for the board, cached per size; shrinks the picture a little at a time until it fits 60 KB
+  const g = gifSrc[slot]; if (!g) throw new Error('GIF slot ' + (slot + 1) + ' is empty');
+  if (g.enc && g.enc.w === w && g.enc.h === h) return g.enc.bytes;
+  for (const f of [1, 0.75, 0.55, 0.4]) {
+    const tw = Math.max(8, Math.round(w * f)), th = Math.max(8, Math.round(h * f)), { frames, delays } = await gifFrames(g, tw, th), fit = gifFit(frames, tw, th, delays);
+    if (fit) { g.enc = { w, h, bytes: fit.bytes, frames: fit.frames, colors: fit.colors }; return fit.bytes; }
+  }
+  throw new Error('this GIF is too detailed to fit 60 KB even at a small size: try a shorter or simpler one');
+}
+function pickGif(done, cancelled, reuseSlot) {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/gif,image/webp,image/png,image/*';
+  inp.onchange = async () => {
+    const f = inp.files[0]; if (!f) { if (cancelled) cancelled(); return; }
+    try {
+      if (f.size > 20 * 1024 * 1024) throw new Error('over 20 MB: use a smaller file');
+      const buf = new Uint8Array(await f.arrayBuffer()), type = f.type || 'image/gif';
+      const slot = reuseSlot !== undefined && reuseSlot !== null ? reuseSlot : freeGifSlot();
+      if (slot === null) { flash('all 4 GIF slots are in use: remove a GIF widget first'); if (cancelled) cancelled(); return; }
+      let bin = ''; for (let i = 0; i < buf.length; i += 8192) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 8192));
+      gifSrc[slot] = { name: f.name.slice(0, 40), type, buf, url: 'data:' + type + ';base64,' + btoa(bin) };
+      await gifFrames(gifSrc[slot], 16, 16); // a quick read to be sure the browser can decode it
+      saveGifs(); done(slot);
+    } catch (e) { flash('could not read the GIF: ' + e.message); if (cancelled) cancelled(); }
+  };
+  inp.click();
+}
+// Bring the board's GIF slots in line with the layout: upload changed ones, delete ones nothing shows
+async function syncGifs(lay, io, progress) {
+  const used = gifsUsed(lay);
+  for (const [slot] of used) if (!gifSrc[slot]) return { ok: false, message: 'GIF ' + (slot + 1) + ' has no file chosen' };
+  const work = []; let need = 0, n = 0;
+  for (const [slot, sz] of used) {
+    progress('preparing GIF ' + (++n) + ' of ' + used.size);
+    const bytes = await encodeGif(slot, sz.w, sz.h);
+    io.send(layoutQueryPacket(slot, 4)); const q = await io.ack(0x0F, 1500);
+    if (!q || q.status !== 0) return { ok: false, message: q ? 'the board does not take GIFs yet (' + q.statusName + ')' : ackText(null) };
+    boardFreeKb = q.freeKb;
+    if (q.crc !== crc32(bytes)) { work.push([slot, bytes]); need += bytes.length; }
+  }
+  for (let slot = 0; slot < GIFS.SLOTS; slot++) {
+    if (used.has(slot)) continue;
+    io.send(layoutQueryPacket(slot, 4)); const q = await io.ack(0x0F, 1500);
+    if (q && q.status === 0 && q.crc !== 0) { io.send(layoutResetPacket(slot, 4)); await io.ack(0x11, 2000); log('removed unused GIF ' + (slot + 1) + ' from the board'); }
+  }
+  io.send(layoutQueryPacket()); const q0 = await io.ack(0x0F, 1500); if (q0) boardFreeKb = q0.freeKb;
+  if (q0 && need / 1024 > q0.freeKb - 8) return { ok: false, message: 'the GIFs need ' + Math.ceil(need / 1024) + ' KB but the board has ' + q0.freeKb + ' KB free (it keeps 8 KB spare; pictures and sounds share the space)' };
+  n = 0;
+  for (const [slot, bytes] of work) {
+    n++;
+    const r = await uploadLayoutBytes(bytes, Object.assign({}, io, { onProgress: (d, t) => progress('GIF ' + n + ' of ' + work.length + ': ' + Math.round(100 * d / t) + '%', d / t) }), { kind: 4, slot, timeoutMs: 1500, tries: 3 });
+    if (!r.ok) return { ok: false, message: 'GIF ' + (slot + 1) + ': ' + r.message };
+    log('GIF ' + (slot + 1) + ' sent, ' + bytes.length + ' bytes');
+  }
+  return { ok: true, sent: work.length };
+}
+Object.assign(window.ttpDebug, { gifSrc, encodeGif, syncGifs, gifFrames, snd, boardSnd, sendSound, sndCheckBoard, sndOpenEditor, sndEditUpdate, resetSound, playOnBoard, get sndMeta() { return sndMeta; } });
 renderSounds();
 
 // ---- start: the last draft from this browser, else a template ----
