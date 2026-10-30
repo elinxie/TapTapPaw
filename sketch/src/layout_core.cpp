@@ -184,7 +184,7 @@ Err int_in(P &p, int32_t lo, int32_t hi, int32_t &v) {
 }
 
 WType wtype_from(const char *s, size_t l) {
-  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl", "ct", "pm", "cd", "sw", "dt", "fs", "bt", "sp", "aa", "rm", "pc", "pt", "gf"};
+  static const char *const names[] = {"", "ac", "dc", "wx", "np", "sb", "tc", "tx", "mc", "sh", "sl", "ct", "pm", "cd", "sw", "dt", "fs", "bt", "sp", "aa", "rm", "pc", "pt", "gf", "nt", "ne", "tm"};
   for (uint8_t i = 1; i < W_COUNT; i++)
     if (key_is(s, l, names[i])) return (WType)i;
   return W_NONE;
@@ -197,7 +197,7 @@ Err parse_widget(P &p, Layout &L) {
   memset(&w, 0, sizeof w);
   w.opa = 255;
   bool hx = false, hy = false, hw = false, hh = false, hp = false, he = false, hi = false;
-  char text[MAX_TEXT_LEN + 1];
+  char text[MAX_NOTE_LEN + 1];
   size_t tl = 0;
   bool has_text = false;
   int32_t v;
@@ -236,7 +236,7 @@ Err parse_widget(P &p, Layout &L) {
       else if (key_is(key, kl, "u")) { e = int_in(p, 0, 4, v); w.u = (uint8_t)v; }
       else if (key_is(key, kl, "s")) {
         e = read_str(p, text, sizeof text, tl);
-        if (!e && tl > MAX_TEXT_LEN) e = E_TEXT;
+        if (!e && tl > MAX_NOTE_LEN) e = E_TEXT; // 24 bytes for most widgets: checked below once the type is known
         has_text = true;
       } else e = skip(p, 3);
       if (e) return e;
@@ -269,9 +269,13 @@ Err parse_widget(P &p, Layout &L) {
       break;
     case W_PICTURE: if (!hi) return E_RANGE; break;
     case W_GIF: if (!hi || w.i >= GIF_SLOTS) return E_RANGE; break;
+    case W_NOTE: case W_EVENTS: if (!has_text || tl == 0) return E_TEXT; break;
+    case W_TIMER: if (!hp || w.p < 1 || w.p > 180) return E_RANGE; break;
     default: break;
   }
-  bool keeps_text = (w.type == W_LABEL || w.type == W_BUTTON || w.type == W_FOCUS || w.type == W_COUNTDOWN);
+  bool long_text = (w.type == W_NOTE || w.type == W_EVENTS);
+  if (has_text && tl > (long_text ? MAX_NOTE_LEN : MAX_TEXT_LEN)) return E_TEXT;
+  bool keeps_text = (w.type == W_LABEL || w.type == W_BUTTON || w.type == W_FOCUS || w.type == W_COUNTDOWN || long_text || w.type == W_TIMER);
   if (w.type == W_LABEL && (!has_text || tl == 0)) return E_TEXT;
   if (keeps_text && has_text && tl > 0) {
     if (L.text_used + tl + 1 > MAX_TEXT_POOL) return E_TEXT_POOL;
@@ -461,6 +465,54 @@ bool wav_check(const uint8_t *h, size_t n, uint32_t total, uint16_t *rate_out) {
   uint32_t data = le32(h + 40);
   if (data != total - WAV_HEADER_BYTES || (data & 1)) return false; // samples run to the end of the file, whole samples
   if (rate_out) *rate_out = (uint16_t)rate;
+  return true;
+}
+
+bool next_event(const char *text, uint16_t now_min, char *out, size_t out_n, uint16_t *in_min) {
+  if (!text || !out || out_n < 8) return false;
+  int best = -1;
+  const char *best_title = NULL;
+  size_t best_len = 0;
+  const char *p = text;
+  while (*p) {
+    const char *end = p;
+    while (*end && *end != '|') end++;
+    const char *q = p;
+    while (q < end && *q == ' ') q++;
+    int hh = -1, mm = -1;
+    if (q < end && *q >= '0' && *q <= '9') {
+      hh = *q++ - '0';
+      if (q < end && *q >= '0' && *q <= '9') hh = hh * 10 + (*q++ - '0');
+      if (q + 2 < end + 0 && *q == ':' && q[1] >= '0' && q[1] <= '9' && q[2] >= '0' && q[2] <= '9') {
+        mm = (q[1] - '0') * 10 + (q[2] - '0');
+        q += 3;
+      } else hh = -1;
+    }
+    if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59 && q < end && *q == ' ') {
+      while (q < end && *q == ' ') q++;
+      const char *te = end;
+      while (te > q && te[-1] == ' ') te--;
+      int t = hh * 60 + mm;
+      if (te > q && t >= now_min && (best < 0 || t < best)) {
+        best = t;
+        best_title = q;
+        best_len = (size_t)(te - q);
+      }
+    }
+    p = *end ? end + 1 : end;
+  }
+  if (best < 0) return false;
+  if (best_len > 40) best_len = 40;
+  if (out_n < best_len + 7) best_len = out_n - 7;
+  out[0] = (char)('0' + best / 600);
+  out[1] = (char)('0' + (best / 60) % 10);
+  out[2] = ':';
+  out[3] = (char)('0' + (best % 60) / 10);
+  out[4] = (char)('0' + best % 10);
+  out[5] = ' ';
+  memcpy(out + 6, best_title, best_len);
+  out[6 + best_len] = '\0';
+  if (in_min) *in_min = (uint16_t)(best - now_min);
   return true;
 }
 

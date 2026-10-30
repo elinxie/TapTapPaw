@@ -65,6 +65,7 @@ static struct { bool running = false, on_break = false; uint32_t end_ms = 0, lef
 static struct { bool running = false; uint32_t start_ms = 0, acc_ms = 0; } SW;
 static bool focus_busy = false;
 static uint32_t remind_next[lc::MAX_WIDGETS_TOTAL]; // millis() when each reminder widget fires next
+static uint32_t timer_end[lc::MAX_WIDGETS_TOTAL]; // millis() when each timer button runs out, 0 = not running
 static uint32_t remind_shown[lc::MAX_WIDGETS_TOTAL]; // millis() it fired, shown as "now" for a minute
 static struct { uint8_t e; uint16_t g; } pend[6]; // button actions, run from the main loop (layout_poll), not inside LVGL
 static uint8_t pend_n = 0;
@@ -699,6 +700,32 @@ static void build_widget(lv_obj_t *p, const Widget &w, RT &r) {
       break;
     }
     case lc::W_PET: r.a = pet_create(p, w.x, w.y, w.n); break;
+    case lc::W_NOTE: case lc::W_EVENTS: {
+      lv_obj_t *o = mkbox(p, w);
+      lv_obj_t *l = mklabel(o, font_for(w.z), color_of(w, 0xFFFFFF));
+      lv_obj_set_width(l, lv_pct(100));
+      lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+      lv_obj_set_style_text_align(l, align_for(w.a), 0);
+      lv_label_set_text(l, w.type == lc::W_NOTE ? L.text + w.toff : "...");
+      r.a = o;
+      r.b = l;
+      break;
+    }
+    case lc::W_TIMER: {
+      lv_obj_t *o = mkbox(p, w);
+      lv_obj_set_style_radius(o, w.r ? w.r : 10, 0);
+      lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+      lv_obj_set_style_bg_color(o, lv_color_hex(color_of(w, ACCENT)), 0);
+      lv_obj_t *l = mklabel(o, font_for(w.z), 0x000000);
+      lv_obj_set_width(l, lv_pct(100));
+      lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+      lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+      lv_label_set_text(l, "");
+      lv_obj_center(l);
+      r.a = o;
+      r.b = l;
+      break;
+    }
     case lc::W_GIF: {
       r.a = gif_create(p, w.x, w.y, w.w, w.h, w.i);
       if (!r.a) { // no GIF in that slot (or no memory): a placeholder box
@@ -839,7 +866,7 @@ static lv_obj_t *prepare_page(uint8_t idx) {
     if (!root) continue;
     void *ud = (void *)(uintptr_t)i;
     switch (w.type) { // tappable widgets
-      case lc::W_BUTTON: case lc::W_POMO: case lc::W_STOPWATCH: case lc::W_FOCUS: case lc::W_REMIND: case lc::W_TCAT: case lc::W_MOOD: case lc::W_PET:
+      case lc::W_BUTTON: case lc::W_POMO: case lc::W_STOPWATCH: case lc::W_FOCUS: case lc::W_REMIND: case lc::W_TCAT: case lc::W_MOOD: case lc::W_PET: case lc::W_TIMER:
         lv_obj_add_flag(root, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(root, widget_cb, LV_EVENT_SHORT_CLICKED, ud);
         lv_obj_add_event_cb(root, widget_cb, LV_EVENT_LONG_PRESSED, ud);
@@ -990,6 +1017,36 @@ static void update_widgets() {
           }
         }
         break;
+      case lc::W_EVENTS:
+        if (r.b) { // the next event left today, from the clock the host sends
+          char ev[64], out[96];
+          uint16_t in = 0;
+          if (!D.have_time) snprintf(out, sizeof out, "Next event: waiting for the time");
+          else if (lc::next_event(L.text + w.toff, (uint16_t)(D.h * 60 + D.m), ev, sizeof ev, &in)) {
+            if (in == 0) snprintf(out, sizeof out, "Next: %s\nnow", ev);
+            else if (in < 60) snprintf(out, sizeof out, "Next: %s\nin %u min", ev, (unsigned)in);
+            else snprintf(out, sizeof out, "Next: %s\nin %u h %u min", ev, (unsigned)(in / 60), (unsigned)(in % 60));
+          } else snprintf(out, sizeof out, "No more events today");
+          if (strcmp(lv_label_get_text(r.b), out)) lv_label_set_text(r.b, out);
+        }
+        break;
+      case lc::W_TIMER:
+        if (r.a && r.b) {
+          uint8_t idx = pg.first + i;
+          char name[32], out[64];
+          if (w.tlen) strlcpy(name, L.text + w.toff, sizeof name);
+          else snprintf(name, sizeof name, "%u min", (unsigned)w.p);
+          if (timer_end[idx]) {
+            int32_t left = (int32_t)(timer_end[idx] - millis());
+            unsigned s = left > 0 ? (unsigned)((left + 999) / 1000) : 0;
+            snprintf(out, sizeof out, "%s\n%u:%02u", name, s / 60, s % 60);
+          } else snprintf(out, sizeof out, "%s\nStart", name);
+          if (strcmp(lv_label_get_text(r.b), out)) {
+            lv_label_set_text(r.b, out);
+            lv_obj_set_style_bg_color(r.a, lv_color_hex(timer_end[idx] ? 0x74E3A4 : color_of(w, ACCENT)), 0);
+          }
+        }
+        break;
       case lc::W_REMIND:
         if (r.b) {
           uint8_t idx = pg.first + i, kind = w.k < 3 ? w.k : 0;
@@ -1045,6 +1102,18 @@ static void timers_cb(lv_timer_t *) {
       ui_toast("Break over: tap to focus again", 4000);
     }
   }
+  for (uint8_t i = 0; i < L.nwidgets; i++) { // one-tap timers
+    const Widget &w = L.widgets[i];
+    if (w.type != lc::W_TIMER || !timer_end[i] || (int32_t)(now - timer_end[i]) < 0) continue;
+    timer_end[i] = 0;
+    char msg[48];
+    if (w.tlen) snprintf(msg, sizeof msg, "Timer done: %s", L.text + w.toff);
+    else snprintf(msg, sizeof msg, "Timer done: %u min", (unsigned)w.p);
+    ui_toast(msg, 6000);
+    set_mood(MOOD_HAPPY);
+    pets_event(PET_ATTENTION, 6000);
+    if (!sound_play(lc::SND_REMINDER)) beepbeep(); // the "Reminder" sound slot
+  }
   for (uint8_t i = 0; i < L.nwidgets; i++) {
     const Widget &w = L.widgets[i];
     if (w.type != lc::W_REMIND || (int32_t)(now - remind_next[i]) < 0) continue;
@@ -1082,6 +1151,18 @@ static void widget_cb(lv_event_t *ev) {
     case lc::W_FOCUS: if (tap) queue_action(lc::BA_FOCUS_TOGGLE, 0); break;
     case lc::W_TCAT: case lc::W_MOOD: if (tap) pet_request(); break;
     case lc::W_PET: if (tap) { pets_petted(); if (!sound_play(lc::SND_PET_TAP)) clickSound(); } break;
+    case lc::W_TIMER:
+      if (tap) { // start the preset, or cancel it while it runs
+        uint8_t idx = pg.first + i;
+        if (timer_end[idx]) timer_end[idx] = 0;
+        else {
+          timer_end[idx] = millis() + (uint32_t)w.p * 60000UL;
+          if (!timer_end[idx]) timer_end[idx] = 1;
+        }
+        clickSound();
+        D.ver++;
+      }
+      break;
     case lc::W_REMIND: if (tap) { uint8_t idx = pg.first + i; remind_next[idx] = millis() + (uint32_t)w.p * 60000UL; remind_shown[idx] = 0; clickSound(); } break;
     default: break;
   }
@@ -1380,6 +1461,7 @@ static void activate() {
   for (uint8_t i = 0; i < L.nwidgets; i++) { // reminders count from now
     remind_next[i] = millis() + (uint32_t)L.widgets[i].p * 60000UL;
     remind_shown[i] = 0;
+    timer_end[i] = 0;
   }
   active = true;
   cur = 0;

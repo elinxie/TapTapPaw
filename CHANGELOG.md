@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - Added: tap the cat (or a pet) to pet it; "Waiting cat" setting: cheerful (default) or sleepy (original).
 - Added: `esp32dev_ble` build: the board is also a Bluetooth keyboard for button shortcuts and media keys.
 - Changed: layout uploads are 3.3x faster (free-space reading cached during uploads).
+- Added: Phase 4c widgets: one-tap timer button (`tm`), note/quote (`nt`, up to 100 bytes) and next-event (`ne`, "HH:MM Title|...") widgets; the timer plays the Reminder sound slot. Feature level 5.
 - Added: animated GIF widget (Phase 4b): the page converts a GIF/WebP/PNG to at most 128x128 and 60 KB with its own encoder, uploads it as kind 4 into one of 4 slots, the board plays it with bitbank2/AnimatedGIF (Apache-2.0). Widget type `gf`, feature level 4.
 - Added: custom sounds (Phase 4a): the web page converts any audio file to the board's WAV format, previews it and uploads it to one of 15 sound slots (connected, disconnected, weather, pet tap, pomodoro end, reminder, four button sounds). Stored as `/snd/<slot>.wav` next to the originals; "Reset sound" deletes only the custom copy. Upload kind 3, `[3, slot]` query/reset, PLAY packet `0x14`, button widget key `u`, feature level 3.
 

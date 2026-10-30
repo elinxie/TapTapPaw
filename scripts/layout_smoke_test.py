@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from layout_tool import Board, ST, begin_pkt, chunk_pkt, pkt, CHUNK
 import sound_smoke_test
 import gif_smoke_test
+import widgets5_smoke_test
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 fails = 0
@@ -254,7 +255,12 @@ def main():
     ok, msg = full(b, cat)
     check("typing cat layout for the waiting test", ok, msg)
     log = b.read_text(92.0)
-    check("cheerful waiting ran 30 s without a crash", "Guru Meditation" not in log and "rst:" not in log and "abort()" not in log, log[-300:])
+    marks = [k for k in ("Guru Meditation", "abort()", "rst:", "Backtrace", "assert failed", "watchdog") if k in log]
+    if marks:  # keep the whole story of a reset: it is the only way to tell what happened
+        i = max(0, min(log.find(k) for k in marks) - 800)
+        open("/tmp/ttp_waiting_crash.log", "w").write(log)
+        print("    reset markers %s; log around the first one (whole log in /tmp/ttp_waiting_crash.log):\n%s" % (marks, log[i:i + 2500]))
+    check("cheerful waiting ran 30 s without a crash", not marks, marks)
     q = b.query()
     check("board alive after the waiting test", q is not None and (q.flags & 1), q)
 
@@ -282,6 +288,9 @@ def main():
 
     # 18 GIF widget (kind 4): scripts/gif_smoke_test.py (also runnable on its own). Skips itself when you already keep GIFs.
     gif_smoke_test.run(b, check, full)
+
+    # 19 timer button, note and next event: scripts/widgets5_smoke_test.py (also runnable on its own)
+    widgets5_smoke_test.run(b, check, full)
 
     # 10 reset
     a = b.reset_layout()

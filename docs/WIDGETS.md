@@ -6,7 +6,7 @@ board over USB; the firmware reads it and builds the screens.
 
 Status: **Phase 1** (layout engine + upload protocol), **Phase 2** (the builder on the web page) and **Phase 3** (typing cat, timers,
 buttons, Bluetooth keys, Spotify controls, pictures, album art, pets; see "Phase 3 widgets" below) are done. **Phase 4a** adds custom
-sounds (see "Custom sounds" below). **Phase 4b** adds the animated GIF widget ("GIF widget" below). Planned next: a one-tap timer button.
+sounds (see "Custom sounds" below). **Phase 4b** adds the animated GIF widget ("GIF widget" below). **Phase 4c** adds a one-tap timer button, a note/quote and a next-event widget ("Timer button, note and next event" below).
 
 ## Using the builder (web page)
 
@@ -114,6 +114,9 @@ The page asks the board (QUERY, `detail` = feature level) before sending; an old
 | `rm` | reminder | `k` 0 water, 1 stretch, 2 breathe; `p` every 5..240 min (30), `z` | beep, cat smiles, note; tap = done |
 | `pc` | picture | `i` slot 0..7 (required) | any size; the page crops and encodes your image to the box |
 | `pt` | pet | `n` species 0..17 (4 = cat) | fixed 160x132; tap to pet it. See "Pets" |
+| `tm` | timer button (feature level 5) | `p` minutes 1..180 (required), `s` label (optional, default "N min"), `z`, `c`, `r` | tap starts, tap again cancels. See below |
+| `nt` | note / quote (feature level 5) | `s` text (1..100 bytes, required), `z`, `a`, `c` | wraps inside its box |
+| `ne` | next event (feature level 5) | `s` events (1..100 bytes, required), `z`, `c` | `HH:MM Title` items separated by `\|`. See below |
 | `gf` | animated GIF (feature level 4) | `i` GIF slot 0..3 (required) | plays at its own size (<= 128x128), centered in the box. See "GIF widget" |
 
 **Button actions** (`e`): 0 none, 1 cat taps, 2 cat happy, 3 cat sleepy, 4 toggle C/F, 5 mute, 6 brightness step, 7 next wallpaper,
@@ -121,6 +124,23 @@ The page asks the board (QUERY, `detail` = feature level) before sending; an old
 15-17 Spotify play-pause / next / previous (web page), 18 event to the page (`g` = number, packet `0x13`), 19 Bluetooth key
 (`g` = modifiers << 8 | HID usage; modifiers 1 Ctrl, 2 Shift, 4 Alt, 8 Cmd/Win), 20 Bluetooth media key (`g` 0 play/pause,
 1 next, 2 previous, 3 volume up, 4 volume down, 5 mute). Bluetooth actions need the Bluetooth build (below); otherwise they show a note.
+
+### Timer button, note and next event
+
+*Firmware feature level 5.*
+
+- **Timer button (`tm`)**: a button that shows its label (or "5 min") and "Start". **One tap starts the preset timer**, the button turns green and counts
+  down `m:ss`; **tap again to cancel**. It keeps running while another page is on screen. At zero the board plays the **Reminder sound slot** (your
+  own sound if you sent one, else two beeps), the cat smiles, the pet cheers and a note "Timer done: ..." appears. Every timer button counts on its own
+  (several per layout are fine). A new layout resets all timers; a reboot does too (they live in RAM).
+- **Note / quote (`nt`)**: static text up to **100 bytes** that wraps inside the box (`a` align, `z` size, `c` color). Text wraps by itself; there are no line breaks in labels (like all label text, only `\"` and `\\` escapes exist).
+- **Next event (`ne`)**: `s` holds up to 8 events as `HH:MM Title` separated by `|`, for example `09:30 Standup|13:00 Lunch|17:00 Home`. The widget shows
+  the earliest one at or after the current time and how long until it ("Next: 13:00 Lunch" / "in 2 h 5 min", "now" in its minute), and "No more events
+  today" after the last. The order does not matter; items that do not parse (`25:00 x`, `12:00` without a title, `12:30Lunch`) are skipped; a title is cut at
+  40 bytes. The clock is the one the host sends (the web page or the desktop app); without it the widget says it is waiting for the time. The board does
+  not read a calendar: you type the day's events (the same list every day).
+- Text budget: all labels share the 512 byte pool; `nt` and `ne` may use up to 100 bytes each (the other widgets 24), so about five long texts fit.
+  The page and the firmware use the same rules (`sketch/test/host/layout-cases.tsv`, and `event-cases.tsv` for the event list).
 
 ### GIF widget
 
@@ -295,8 +315,8 @@ node web-sync/test-sounds.mjs        # sounds: WAV encode/check, resampling, tri
 ~/.venvs/pio39/bin/python scripts/layout_tool.py sound clip.wav --slot 9 | soundreset --slot 9 | play --slot 9
 ```
 
-`sketch/test/host/layout-cases.tsv` is a table of 128 layouts with the expected verdict; the firmware parser and the page validator must
-both agree with every row.
+`sketch/test/host/layout-cases.tsv` is a table of 145 layouts with the expected verdict; the firmware parser and the page validator must
+both agree with every row. `event-cases.tsv` does the same for the next-event list.
 
 ## Measured size (build flags `-DINVERT_COLORS_DEFAULT=1`)
 
@@ -306,6 +326,17 @@ both agree with every row.
 | `esp32dev` RAM (static) | 57,552 B (17.6 %) | 59,752 B (18.2 %) | +2,200 B |
 | `esp32dev_wifi` flash (2,883,584 B partition) | 1,950,537 B (67.6 %) | 1,966,785 B (68.2 %) | +16,248 B |
 | `esp32dev_wifi` RAM (static) | 83,020 B (25.3 %) | 85,204 B (26.0 %) | +2,184 B |
+
+Phase 4c (`feature/timer-widgets`, measured 2026-10-30), after 4b (GIF, +AnimatedGIF):
+
+| | Phase 4a | Phase 4b | Phase 4c |
+|--|--|--|--|
+| `esp32dev` flash (1,441,792 B) | 1,340,625 B (93.0 %) | 1,350,225 B (93.6 %) | 1,352,337 B (93.8 %), ~89 KB left |
+| `esp32dev` RAM (static) | 61,488 B | 61,544 B | 61,704 B |
+| `esp32dev_wifi` flash (2,883,584 B) | 2,056,961 B (71.3 %) | 2,066,741 B (71.7 %) | 2,068,797 B (71.7 %) |
+| `esp32dev_wifi` RAM (static) | 87,228 B | 87,284 B | 87,444 B |
+| `esp32dev_ble` flash (2,883,584 B) | 1,716,261 B (59.5 %) | 1,725,993 B (59.9 %) | 1,728,173 B (59.9 %) |
+| `esp32dev_ble` RAM (static) | 76,080 B | 76,136 B | 76,296 B |
 
 Phase 4a (`feature/custom-sounds`, measured 2026-10-29):
 

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const code = html.split('<script>')[1].split('// ---- UI ----')[0];
-const lib = new Function(code + '; return { pkt, LAYOUT, LAYOUT_ERRORS, crc32, validateLayout, layoutBeginPacket, layoutChunkPacket, layoutChunkCount, layoutEndPacket, layoutAbortPacket, layoutQueryPacket, layoutResetPacket, parseLayoutAck, uploadLayoutBytes, wavEncode, wavCheck, mixToMono, resample, prepareSound, soundBytesFit, soundFitSeconds, playPacket, SND, SOUND_SLOTS };')();
+const lib = new Function(code + '; return { pkt, LAYOUT, LAYOUT_ERRORS, crc32, validateLayout, layoutBeginPacket, layoutChunkPacket, layoutChunkCount, layoutEndPacket, layoutAbortPacket, layoutQueryPacket, layoutResetPacket, parseLayoutAck, uploadLayoutBytes, nextEvent, wavEncode, wavCheck, mixToMono, resample, prepareSound, soundBytesFit, soundFitSeconds, playPacket, SND, SOUND_SLOTS };')();
 const arr = (u8) => Array.from(u8);
 const enc = (s) => new TextEncoder().encode(s);
 const here = (p) => new URL(p, import.meta.url);
@@ -170,4 +170,20 @@ console.log('layout tests ok (' + n + ' shared cases)');
   assert.deepEqual(arr(lib2.jpegStripApp(jp)), [0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 1, 2, 0xFF, 0xDB, 0, 3, 7, 0xFF, 0xDA, 0, 2, 0xAA, 0xFF, 0xE2, 0xBB, 0xFF, 0xD9]);
   assert.deepEqual(arr(lib2.jpegStripApp(Uint8Array.from([1, 2, 3]))), [1, 2, 3]);
   console.log('picture tests ok');
+}
+
+// next-event widget: the same table the firmware's next_event() is tested with
+{
+  let n = 0;
+  for (const line of readFileSync(here('../sketch/test/host/event-cases.tsv'), 'utf8').split('\n')) {
+    if (!line || line.startsWith('#')) continue;
+    const [text, now, want] = line.split('\t');
+    if (want === undefined) continue;
+    const [hh, mm] = now.split(':').map(Number), ev = lib.nextEvent(text, hh * 60 + mm);
+    const got = ev ? ev.time + ' ' + ev.title + '|' + ev.inMin : 'none';
+    assert.equal(got, want, 'event case [' + text + '] at ' + now);
+    n++;
+  }
+  assert.ok(n >= 15);
+  console.log('next event tests ok (' + n + ' cases)');
 }

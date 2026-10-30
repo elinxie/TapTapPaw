@@ -61,6 +61,12 @@ Spotify again once, and Spotify Premium).
 
 `node web-sync/test-layout.mjs` and `node web-sync/test-editor.mjs` test the layout code and the editor model.
 
+### Timer button, note and next event
+
+Three more builder widgets (no uploads): **Timer button** (tap to start a preset timer, tap again to cancel; the end plays the Reminder sound),
+**Note / quote** (up to 100 bytes, wraps) and **Next event** (type the day as `09:30 Standup|13:00 Lunch`; the preview uses this computer's clock, the
+board the clock this page sends). See `WIDGETS.md`.
+
 ### GIF widget (upload kind 4, packets `0x0F` / `0x11` with `[4, slot]`)
 
 **+ GIF (animated)** in the builder asks for an animated GIF, WebP or PNG (or a photo), keeps the source in this browser (up to 250 KB

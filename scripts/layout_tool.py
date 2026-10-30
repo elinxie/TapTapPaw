@@ -14,7 +14,7 @@
 The normal way to do this is the web page; this exists for tests and for debugging without a browser.
 Quit the TapTapPaw desktop app first: only one program can hold the serial port.
 """
-import argparse, glob, struct, sys, time, zlib
+import argparse, glob, os, struct, sys, time, zlib
 
 try:
     import serial
@@ -80,6 +80,15 @@ class Board:
         time.sleep(boot_wait)
         self.ser.reset_input_buffer()
         self.buf = b""
+        # TTP_TRANSCRIPT=/path: keep every byte the board sends (boot ROM lines, panics) for diagnosing resets
+        self.transcript = open(os.environ["TTP_TRANSCRIPT"], "ab") if os.environ.get("TTP_TRANSCRIPT") else None
+
+    def _read(self, n):
+        d = self.ser.read(n)
+        if d and self.transcript:
+            self.transcript.write(time.strftime("[%H:%M:%S] ").encode() + d.replace(b"\xff", b"<FF>") + (b"" if d.endswith(b"\n") else b"\n"))
+            self.transcript.flush()
+        return d
 
     def close(self):
         self.ser.close()
@@ -99,7 +108,7 @@ class Board:
         end = time.time() + seconds
         text = b""
         while time.time() < end:
-            d = self.ser.read(512)
+            d = self._read(512)
             text += d
             self.buf += d
         return text.decode("latin-1")
@@ -112,7 +121,7 @@ class Board:
         """Wait for a 0x10 ack for `cmd`; other serial text (boot log) is skipped."""
         end = time.time() + timeout
         while time.time() < end:
-            self.buf += self.ser.read(256)
+            self.buf += self._read(256)
             i = self.buf.find(b"\xFF\x10\x0C")
             while i >= 0 and len(self.buf) >= i + 15:
                 a = Ack(self.buf[i:i + 15])
