@@ -15,6 +15,7 @@ constexpr uint8_t MAX_WIDGETS_PAGE = 12;
 constexpr uint8_t MAX_WIDGETS_TOTAL = 40;
 constexpr size_t MAX_TEXT_POOL = 512;
 constexpr uint8_t MAX_TEXT_LEN = 24;
+constexpr uint8_t MAX_NOTE_LEN = 100; // note and next-event widgets may hold longer text (they share the 512 byte text pool)
 constexpr uint16_t CHUNK_BYTES = 192; // fixed chunk size: chunk n starts at byte n * 192
 constexpr uint32_t MAX_PICTURE_BYTES = 65536; // upload kind 1: an SJPG picture stored in LittleFS (/img/<slot>.sjpg)
 constexpr uint32_t MAX_ART_BYTES = 12288; // upload kind 2: album art, a plain 96x96 JPEG kept in RAM only
@@ -44,15 +45,23 @@ enum WType : uint8_t {
   W_PET, // ASCII pet (src/pets), fixed 160x132, species in "n"
   // feature level 4
   W_GIF, // animated GIF from slot "i" (0..3), drawn at its own size, centered in the box
+  // feature level 5
+  W_NOTE, // note / quote: wrapped text "s" up to 100 bytes
+  W_EVENTS, // next event: "s" = "HH:MM Title|HH:MM Title|..." (up to 8), shows the next one left today and the time until it
+  W_TIMER, // one-tap timer button: "p" minutes (1..180), optional label "s"; tap starts, tap again cancels
   W_COUNT
 };
 // Does `h` (the first WAV_HEADER_BYTES bytes) describe a sound the board can play, in a file of `total` bytes? Canonical layout only:
 // RIFF/WAVE, "fmt " (16 bytes, PCM, mono, 16-bit, rate SOUND_RATE_MIN..MAX), "data" running to the end of the file. Same rules as the page.
 bool wav_check(const uint8_t *h, size_t n, uint32_t total, uint16_t *rate_out = nullptr);
+// Next event for the next-event widget. `text` = "HH:MM Title|HH:MM Title|..."; items that do not parse are skipped. Finds the earliest event
+// at or after `now_min` (minutes after midnight): writes "HH:MM Title" (title cut to 40 bytes) to `out` and the minutes until it to *in_min.
+// Returns false when nothing is left today.
+bool next_event(const char *text, uint16_t now_min, char *out, size_t out_n, uint16_t *in_min);
 // A GIF the board can show: "GIF87a"/"GIF89a", canvas 1..128 x 1..128, ends with the 0x3B trailer. (The decoder test on the board does the rest.)
 bool gif_check(const uint8_t *h, size_t n, uint32_t total, const uint8_t *tail2, uint16_t *w_out = nullptr, uint16_t *h_out = nullptr);
 // What this firmware understands; reported in the QUERY ack's detail byte (older firmware answers 0).
-constexpr uint8_t FEATURE_LEVEL = 4;
+constexpr uint8_t FEATURE_LEVEL = 5;
 constexpr uint8_t PICTURE_SLOTS = 8;
 
 // Button widget actions ("e"). Arg ("g") only for the ones marked.

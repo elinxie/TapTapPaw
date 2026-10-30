@@ -1,0 +1,20 @@
+# <events text>\t<now as HH:MM>\t<expected: "HH:MM Title|minutes until", or "none">. Shared by layout_core_test.cpp and web-sync/test-layout.mjs.
+09:30 Standup|13:00 Lunch|17:00 Home	08:00	09:30 Standup|90
+09:30 Standup|13:00 Lunch|17:00 Home	09:30	09:30 Standup|0
+09:30 Standup|13:00 Lunch|17:00 Home	09:31	13:00 Lunch|209
+09:30 Standup|13:00 Lunch|17:00 Home	17:00	17:00 Home|0
+09:30 Standup|13:00 Lunch|17:00 Home	17:01	none
+17:00 Home|09:30 Standup|13:00 Lunch	10:00	13:00 Lunch|180
+9:05 Early bird	00:00	09:05 Early bird|545
+23:59 Last call	23:58	23:59 Last call|1
+00:00 Midnight	00:00	00:00 Midnight|0
+ 08:15   Spaced out  |  12:00 Noon 	08:00	08:15 Spaced out|15
+25:00 Bad hour|12:60 Bad minute|12:00 Fine	11:00	12:00 Fine|60
+noon Lunch|12:00	11:00	none
+12:00	11:00	none
+12:00 |13:00 Real	11:00	13:00 Real|120
+12:30Lunch|14:00 Ok	11:00	14:00 Ok|180
+1:2 Short|14:00 Ok	11:00	14:00 Ok|180
+10:00 Same|10:00 Later same	09:00	10:00 Same|60
+	09:00	none
+||	09:00	none

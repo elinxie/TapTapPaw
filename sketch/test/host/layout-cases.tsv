@@ -128,3 +128,20 @@ value out of range	{"v":1,"pg":[{"w":[{"t":"gf","x":0,"y":0,"w":64,"h":64,"i":4}
 value out of range	{"v":1,"pg":[{"w":[{"t":"gf","x":0,"y":0,"w":64,"h":64}]}]}
 widget outside the 240x320 screen	{"v":1,"pg":[{"w":[{"t":"gf","x":200,"y":0,"w":64,"h":64,"i":1}]}]}
 syntax error	{"v":1,"pg":[{"w":[{"t":"gf","x":0,"y":0,"w":64,"h":64,"i":"a"}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"nt","x":0,"y":0,"w":200,"h":80,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"}]}]}
+bad text	{"v":1,"pg":[{"w":[{"t":"nt","x":0,"y":0,"w":200,"h":80,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"}]}]}
+bad text	{"v":1,"pg":[{"w":[{"t":"tx","x":0,"y":0,"w":200,"h":20,"s":"ttttttttttttttttttttttttt"}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"tx","x":0,"y":0,"w":200,"h":20,"s":"tttttttttttttttttttttttt"}]}]}
+bad text	{"v":1,"pg":[{"w":[{"t":"nt","x":0,"y":0,"w":200,"h":80}]}]}
+bad text	{"v":1,"pg":[{"w":[{"t":"nt","x":0,"y":0,"w":200,"h":80,"s":""}]}]}
+ok	{"v":1,"pg":[{"w":[{"s":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","t":"nt","x":0,"y":0,"w":200,"h":80,"z":1,"a":1,"c":"#ff0"}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"ne","x":0,"y":0,"w":220,"h":44,"s":"09:30 Standup|13:00 Lunch"}]}]}
+bad text	{"v":1,"pg":[{"w":[{"t":"ne","x":0,"y":0,"w":220,"h":44}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"tm","x":0,"y":0,"w":104,"h":52,"p":5}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"tm","x":0,"y":0,"w":104,"h":52,"p":180,"s":"Tea","z":1,"r":8,"c":"#fff"}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"tm","x":0,"y":0,"w":104,"h":52}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"tm","x":0,"y":0,"w":104,"h":52,"p":0}]}]}
+value out of range	{"v":1,"pg":[{"w":[{"t":"tm","x":0,"y":0,"w":104,"h":52,"p":181}]}]}
+bad text	{"v":1,"pg":[{"w":[{"t":"tm","x":0,"y":0,"w":104,"h":52,"p":5,"s":"ttttttttttttttttttttttttt"}]}]}
+ok	{"v":1,"pg":[{"w":[{"t":"nt","x":0,"y":0,"w":10,"h":10,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"},{"t":"nt","x":0,"y":20,"w":10,"h":10,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"},{"t":"nt","x":0,"y":40,"w":10,"h":10,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"},{"t":"nt","x":0,"y":60,"w":10,"h":10,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"},{"t":"nt","x":0,"y":80,"w":10,"h":10,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"}]}]}
+text pool full	{"v":1,"pg":[{"w":[{"t":"nt","x":0,"y":0,"w":10,"h":10,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"},{"t":"nt","x":0,"y":20,"w":10,"h":10,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"},{"t":"nt","x":0,"y":40,"w":10,"h":10,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"},{"t":"nt","x":0,"y":60,"w":10,"h":10,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"},{"t":"nt","x":0,"y":80,"w":10,"h":10,"s":"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"},{"t":"nt","x":0,"y":100,"w":10,"h":10,"s":"xxxxxxxxxx"}]}]}

@@ -709,7 +709,7 @@ static void test_sounds() {
   st.pic_crc[2] = 0x2222;
   for (int i = 0; i < SND_ORIGINALS; i++) st.originals[i] = "ORIGINAL" + std::to_string(i);
   auto originals_intact = [&]() { for (int i = 0; i < SND_ORIGINALS; i++) if (st.originals[i] != "ORIGINAL" + std::to_string(i)) return false; return true; };
-  CHECK(FEATURE_LEVEL == 4);
+  CHECK(FEATURE_LEVEL == 5);
   // one second of sound into the "pomodoro end" slot
   std::string wav = fake_wav(16000);
   uint32_t wc = crc32((const uint8_t *)wav.data(), wav.size());
@@ -872,6 +872,32 @@ static void test_gifs() {
   CHECK(gif_check((const uint8_t *)good.data(), 44, (uint32_t)good.size(), (const uint8_t *)(good.data() + good.size() - 2), &w, &h) && w == 64 && h == 64);
 }
 
+static void test_next_event() {
+  std::ifstream f("sketch/test/host/event-cases.tsv");
+  std::string line;
+  int n = 0;
+  while (std::getline(f, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    size_t a = line.find('\t'), b = line.find('\t', a + 1);
+    if (a == std::string::npos || b == std::string::npos) continue;
+    std::string text = line.substr(0, a), now = line.substr(a + 1, b - a - 1), want = line.substr(b + 1);
+    uint16_t nm = (uint16_t)(atoi(now.c_str()) * 60 + atoi(now.c_str() + 3)), mins = 0;
+    char out[64];
+    bool got = next_event(text.c_str(), nm, out, sizeof out, &mins);
+    std::string have = got ? std::string(out) + "|" + std::to_string(mins) : "none";
+    if (have != want) printf("event case failed: [%s] at %s: wanted [%s] got [%s]\n", text.c_str(), now.c_str(), want.c_str(), have.c_str());
+    CHECK(have == want);
+    n++;
+  }
+  CHECK(n >= 15);
+  char small[8];
+  uint16_t m = 0;
+  CHECK(!next_event(nullptr, 0, small, sizeof small, &m) && !next_event("12:00 x", 0, small, 4, &m));
+  CHECK(next_event("12:00 abc", 0, small, sizeof small, &m) && strlen(small) <= 7); // a small buffer cuts the title, never overflows
+  char big[64];
+  CHECK(next_event("12:00 0123456789012345678901234567890123456789012345678901234567890123456789", 0, big, sizeof big, &m) && strlen(big) == 6 + 40); // 40 byte title limit
+}
+
 int main() {
   test_crc();
   test_parse_good();
@@ -886,6 +912,7 @@ int main() {
   test_wav_check();
   test_sounds();
   test_gifs();
+  test_next_event();
   printf("layout_core: %d checks passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

@@ -313,14 +313,14 @@ function spotifyInfo(j) {
   return { title: it.name || '', artist, state: j.is_playing ? 1 : 2 };
 }
 // ---- Widget layout (docs/WIDGETS.md): schema validation, CRC32, upload packets 0x0B..0x11, ack decoding. Unit-tested in test-layout.mjs ----
-const LAYOUT = { VERSION: 1, MAX_BYTES: 4096, MAX_PAGES: 6, MAX_WIDGETS_PAGE: 12, MAX_WIDGETS_TOTAL: 40, MAX_TEXT_POOL: 512, MAX_TEXT_LEN: 24, CHUNK: 192, W: 240, H: 320 };
+const LAYOUT = { VERSION: 1, MAX_BYTES: 4096, MAX_PAGES: 6, MAX_WIDGETS_PAGE: 12, MAX_WIDGETS_TOTAL: 40, MAX_TEXT_POOL: 512, MAX_TEXT_LEN: 24, MAX_NOTE_LEN: 100, CHUNK: 192, W: 240, H: 320 };
 // same names and order as Err in sketch/src/layout_core.h
 const LAYOUT_ERRORS = ['ok', 'empty', 'too big', 'syntax error', 'nested too deep', 'unsupported version', 'no pages', 'too many pages', 'bad page',
   'second main page', 'too many widgets', 'unknown widget type', 'widget outside the 240x320 screen', 'bad color', 'value out of range',
   'bad text', 'text pool full', 'trailing data'];
-const WIDGET_TYPES = ['', 'ac', 'dc', 'wx', 'np', 'sb', 'tc', 'tx', 'mc', 'sh', 'sl', 'ct', 'pm', 'cd', 'sw', 'dt', 'fs', 'bt', 'sp', 'aa', 'rm', 'pc', 'pt', 'gf'];
+const WIDGET_TYPES = ['', 'ac', 'dc', 'wx', 'np', 'sb', 'tc', 'tx', 'mc', 'sh', 'sl', 'ct', 'pm', 'cd', 'sw', 'dt', 'fs', 'bt', 'sp', 'aa', 'rm', 'pc', 'pt', 'gf', 'nt', 'ne', 'tm'];
 // firmware feature level each widget type needs (QUERY ack detail; firmware before Phase 3 answers 0)
-const WIDGET_LEVEL = { ct: 2, pm: 2, cd: 2, sw: 2, dt: 2, fs: 2, bt: 2, sp: 2, aa: 2, rm: 2, pc: 2, pt: 2, gf: 4 };
+const WIDGET_LEVEL = { ct: 2, pm: 2, cd: 2, sw: 2, dt: 2, fs: 2, bt: 2, sp: 2, aa: 2, rm: 2, pc: 2, pt: 2, gf: 4, nt: 5, ne: 5, tm: 5 };
 // button actions, same order as BtnAction in sketch/src/layout_core.h. arg: what "g" means. ble: needs the Bluetooth keyboard build.
 const BTN_ACTIONS = [
   { name: 'None' }, { name: 'Cat taps (+1 tap)' }, { name: 'Cat happy' }, { name: 'Cat sleepy' }, { name: 'Toggle C/F' }, { name: 'Mute / unmute' },
@@ -453,7 +453,7 @@ function checkWidget(w, st) {
     else if (key === 's') {
       if (typeof v !== 'string') return 'syntax error';
       if (/[\u0000-\u001F]/.test(v) || BAD_SURROGATE.test(v)) return 'syntax error';
-      if (utf8(v).length > LAYOUT.MAX_TEXT_LEN) return 'bad text';
+      if (utf8(v).length > LAYOUT.MAX_NOTE_LEN) return 'bad text'; // 24 for most widgets: checked below once the type is known
       text = v;
     }
   }
@@ -471,7 +471,10 @@ function checkWidget(w, st) {
   if (t === 'bt') { if (ev === null || ev >= BTN_ACTIONS.length) return 'value out of range'; if (text === null || text.length === 0) return 'bad text'; }
   if (t === 'pc' && slot === null) return 'value out of range';
   if (t === 'gf' && (slot === null || slot >= GIFS.SLOTS)) return 'value out of range';
-  if ((t === 'bt' || t === 'fs' || t === 'cd') && text) {
+  if (t === 'tm' && (p === null || p < 1 || p > 180)) return 'value out of range';
+  if ((t === 'nt' || t === 'ne') && (text === null || text.length === 0)) return 'bad text';
+  if (text !== null && utf8(text).length > ((t === 'nt' || t === 'ne') ? LAYOUT.MAX_NOTE_LEN : LAYOUT.MAX_TEXT_LEN)) return 'bad text';
+  if ((t === 'bt' || t === 'fs' || t === 'cd' || t === 'nt' || t === 'ne' || t === 'tm') && text) {
     const n = utf8(text).length;
     if (st.text + n + 1 > LAYOUT.MAX_TEXT_POOL) return 'text pool full';
     st.text += n + 1;
@@ -609,6 +612,9 @@ const WIDGET_DEFS = {
   pc: { name: 'Picture', w: 96, h: 96, o: ['pic'] }, // your image, encoded at the widget's size when sent
   aa: { name: 'Album art', w: 96, h: 96, fixed: true, o: [] }, // current Spotify cover, sent by this page
   pt: { name: 'Pet', w: 160, h: 132, fixed: true, o: ['n'], def: { n: 4 } },
+  nt: { name: 'Note / quote', w: 200, h: 80, o: ['s', 'z', 'a', 'c'], def: { s: 'Be kind to your future self.' } },
+  ne: { name: 'Next event', w: 220, h: 44, o: ['s', 'z', 'c'], def: { s: '09:30 Standup|13:00 Lunch|17:00 Home' } },
+  tm: { name: 'Timer button', w: 104, h: 52, o: ['p', 's', 'z', 'c', 'r'], def: { p: 5 } },
   gf: { name: 'GIF (animated)', w: 96, h: 96, o: ['gif'] }, // your GIF, re-encoded to at most 128x128 and 60 KB when sent // ASCII pets from claude-desktop-buddy (MIT)
 };
 // what the tappable widgets do on the board, shown in the property panel
@@ -621,6 +627,9 @@ const WIDGET_HINT = {
   sp: 'Previous / play-pause / next. Needs the web page connected and signed in to Spotify (Premium).',
   pc: 'Resize freely: the picture is cropped to fill the box and converted when you press Send. Each picture uses one of the board\'s 8 picture slots.',
   aa: 'Shows the cover of what Spotify is playing. This page sends it when the track changes (signed in to Spotify, page connected).',
+  nt: 'A note or quote (up to 100 bytes) that wraps inside its box. The text counts against the 512 byte text budget shared by all labels.',
+  ne: 'Shows the next event left today and the time until it. Write events as "HH:MM Title" separated by |, up to 8 (for example 09:30 Standup|13:00 Lunch). The clock comes from the web page or the desktop app.',
+  tm: 'Tap to start the timer, tap again to cancel it. When it ends the board plays the Reminder sound (Sounds section), the cat smiles and a note appears. It keeps running when the page is not on screen.',
   gf: 'Plays an animated GIF (also animated WebP or PNG, or a photo). The page shrinks it to fit the board: at most 128x128 and 60 KB, fewer colors or frames if needed, centered in this box. Each GIF uses one of 4 GIF slots. Needs firmware feature level 4.',
   pt: 'Tap to pet it (hearts). It gets busy while you type, cheers when a pomodoro ends and waves at reminders. Pets by Anthropic\'s claude-desktop-buddy (MIT).',
   ct: 'Taps along with the board keys, button widgets, the desktop app and Bluetooth keys. Blinks, falls asleep, chases the mouse paw.',
@@ -652,7 +661,7 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const deepCopy = (o) => JSON.parse(JSON.stringify(o));
 const snapTo = (v, g) => (g > 1 ? Math.round(v / g) * g : Math.round(v));
 
-const TEXT_TYPES = ['tx', 'bt', 'fs', 'cd']; // widgets whose text uses the board's 512 byte label pool
+const TEXT_TYPES = ['tx', 'bt', 'fs', 'cd', 'nt', 'ne', 'tm']; // widgets whose text uses the board's 512 byte label pool
 function newPage() { return { main: false, bg: { t: 'w' }, w: [] }; }
 
 // Turns a validated layout object (schema v1) into editor state with ids.
@@ -683,8 +692,8 @@ function layoutFromState(st) {
       if (w.f) r.f = 1;
       if (w.q) r.q = 1;
       if (w.c) r.c = w.c;
-      if (w.t === 'tx' || w.t === 'bt') r.s = w.s || '';
-      else if ((w.t === 'fs' || w.t === 'cd') && w.s) r.s = w.s;
+      if (w.t === 'tx' || w.t === 'bt' || w.t === 'nt' || w.t === 'ne') r.s = w.s || '';
+      else if ((w.t === 'fs' || w.t === 'cd' || w.t === 'tm') && w.s) r.s = w.s;
       return r;
     });
     return o;
@@ -721,7 +730,7 @@ function createEditor(initial) {
       return null;
     },
     total() { return st.pages.reduce((n, p) => n + p.w.length, 0); },
-    textBytes() { return st.pages.reduce((n, p) => n + p.w.reduce((m, w) => m + (TEXT_TYPES.includes(w.t) && (w.s || w.t === 'tx' || w.t === 'bt') ? utf8(w.s || '').length + 1 : 0), 0), 0); },
+    textBytes() { return st.pages.reduce((n, p) => n + p.w.reduce((m, w) => m + (TEXT_TYPES.includes(w.t) && (w.s || w.t === 'tx' || w.t === 'bt' || w.t === 'nt' || w.t === 'ne') ? utf8(w.s || '').length + 1 : 0), 0), 0); },
 
     // ---- pages ----
     addPage() {
@@ -775,7 +784,8 @@ function createEditor(initial) {
       const f = ed.find(id); if (!f) return { ok: false, why: 'no such widget' };
       if (key === 's') {
         value = String(value);
-        if (utf8(value).length > LAYOUT.MAX_TEXT_LEN) return { ok: false, why: 'at most ' + LAYOUT.MAX_TEXT_LEN + ' bytes (letters with accents count 2)' };
+        const lim = (f.w.t === 'nt' || f.w.t === 'ne') ? LAYOUT.MAX_NOTE_LEN : LAYOUT.MAX_TEXT_LEN;
+        if (utf8(value).length > lim) return { ok: false, why: 'at most ' + lim + ' bytes (letters with accents count 2)' };
         if (/[\u0000-\u001F]/.test(value) || BAD_SURROGATE.test(value)) return { ok: false, why: 'control characters are not allowed' };
         if (ed.textBytes() - utf8(f.w.s || '').length + utf8(value).length > LAYOUT.MAX_TEXT_POOL - 1) return { ok: false, why: 'label text budget is full' };
       }
@@ -901,12 +911,27 @@ const SOUND_SLOTS = [
   { name: 'Weather: night', hint: 'the weather changes to night', original: 'climate_night.wav' },
   { name: 'Pet tap', hint: 'you tap the cat or a pet widget (default: a soft purr, or a click on a pet widget)', fallback: 'built-in purr / click' },
   { name: 'Pomodoro end', hint: 'a pomodoro work or break period ends (default: two beeps)', fallback: 'built-in double beep' },
-  { name: 'Reminder', hint: 'a reminder widget goes off (default: two beeps)', fallback: 'built-in double beep' },
+  { name: 'Reminder', hint: 'a reminder widget goes off or a timer button runs out (default: two beeps)', fallback: 'built-in double beep' },
   { name: 'Button sound 1', hint: 'a button widget with "Press sound" set to 1 is tapped', fallback: 'built-in click' },
   { name: 'Button sound 2', hint: 'a button widget with "Press sound" set to 2 is tapped', fallback: 'built-in click' },
   { name: 'Button sound 3', hint: 'a button widget with "Press sound" set to 3 is tapped', fallback: 'built-in click' },
   { name: 'Button sound 4', hint: 'a button widget with "Press sound" set to 4 is tapped', fallback: 'built-in click' },
 ];
+// Next event of the next-event widget: "HH:MM Title|HH:MM Title". Mirrors lc::next_event in layout_core.cpp (same cases in event-cases.tsv).
+function nextEvent(text, nowMin) {
+  let best = null;
+  for (const raw of String(text || '').split('|')) {
+    const m = /^ *(\d{1,2}):(\d\d) +(.*?) *$/.exec(raw);
+    if (!m || !m[3]) continue;
+    const hh = +m[1], mm = +m[2];
+    if (hh > 23 || mm > 59) continue;
+    const t = hh * 60 + mm;
+    if (t >= nowMin && (best === null || t < best.t)) best = { t, title: m[3].slice(0, 40) };
+  }
+  if (!best) return null;
+  const p2 = (n) => String(n).padStart(2, '0');
+  return { time: p2(Math.floor(best.t / 60)) + ':' + p2(best.t % 60), title: best.title, inMin: best.t - nowMin };
+}
 function wavEncode(pcm, rate) { // Int16Array -> canonical WAV (what the board's WAVFileReader reads)
   const n = pcm.length, out = new Uint8Array(SND.HEADER + n * 2), dv = new DataView(out.buffer);
   const tag = (o, s) => { for (let i = 0; i < 4; i++) out[o + i] = s.charCodeAt(i); };
@@ -1449,6 +1474,17 @@ function drawWidget(w, s, box) {
       const l = el('pre', 'margin:0;position:absolute;left:0;right:0;top:28px;text-align:center;font:bold 16px/16px ui-monospace,Menlo,monospace;color:' + q.c, box);
       l.textContent = q.l.join('\n'); break;
     }
+    case 'nt':
+      box.style.cssText += ';overflow:hidden;white-space:normal;word-break:break-word;text-align:' + ['left', 'center', 'right'][w.a | 0] + ';color:' + (w.c || '#fff') + ';font:' + font + ' Montserrat,system-ui';
+      box.textContent = w.s || ''; break;
+    case 'ne': {
+      const now = new Date(), ev = nextEvent(w.s, now.getHours() * 60 + now.getMinutes());
+      box.style.cssText += ';overflow:hidden;white-space:pre-wrap;color:' + (w.c || '#fff') + ';font:' + font + ' Montserrat,system-ui';
+      box.textContent = ev ? 'Next: ' + ev.time + ' ' + ev.title + '\n' + (ev.inMin === 0 ? 'now' : ev.inMin < 60 ? 'in ' + ev.inMin + ' min' : 'in ' + Math.floor(ev.inMin / 60) + ' h ' + (ev.inMin % 60) + ' min') : 'No more events today'; break;
+    }
+    case 'tm':
+      box.style.cssText += ';display:flex;align-items:center;justify-content:center;text-align:center;white-space:pre-line;border-radius:' + (w.r || 10) + 'px;background:' + (w.c || '#FBC979') + ';color:#000;font:' + font + ' Montserrat,system-ui';
+      box.textContent = (w.s || (w.p || 5) + ' min') + '\nStart'; break;
     case 'gf':
       box.style.background = gifSrc[w.i] ? 'url(' + gifSrc[w.i].url + ') center/contain no-repeat' : 'rgba(0,0,0,.31)';
       if (!gifSrc[w.i]) { box.style.cssText += ';display:flex;align-items:center;justify-content:center;color:#A99BB3;font:12px system-ui'; box.textContent = 'no GIF'; }
@@ -1600,9 +1636,9 @@ function renderProps(force) {
   h += '<div class="row">' + ['x', 'y', 'w', 'h'].map((k) => '<label style="min-width:0">' + k + '</label> <input type="number" data-k="' + k + '"' + (d.fixed && (k === 'w' || k === 'h') ? ' disabled' : '') + '>').join(' ') + '</div>';
   if (d.fixed) h += '<div class="mute">Fixed size on the board (' + d.w + 'x' + d.h + ').</div>';
   for (const k of d.o) {
-    if (k === 's') h += opt(w.t === 'fs' ? 'Busy text' : w.t === 'cd' ? 'Caption' : w.t === 'bt' ? 'Label' : 'Text', '<input type="text" data-k="s" style="width:180px" placeholder="' + (w.t === 'fs' ? 'Focus' : w.t === 'cd' ? 'none' : '') + '"> <span class="err" id="pErr"></span>');
+    if (k === 's') h += opt(w.t === 'fs' ? 'Busy text' : w.t === 'cd' ? 'Caption' : w.t === 'bt' || w.t === 'tm' ? 'Label' : w.t === 'ne' ? 'Events' : 'Text', '<input type="text" data-k="s" style="width:' + (w.t === 'nt' || w.t === 'ne' ? 260 : 180) + 'px" placeholder="' + (w.t === 'fs' ? 'Focus' : w.t === 'cd' || w.t === 'tm' ? 'none' : w.t === 'ne' ? '09:30 Standup|13:00 Lunch' : '') + '"> <span class="err" id="pErr"></span>');
     if (k === 'p' && w.t === 'cd') h += opt('Count to', '<input type="time" id="pTime" value="' + two(Math.floor((w.p | 0) / 60)) + ':' + two((w.p | 0) % 60) + '">');
-    else if (k === 'p') h += opt(w.t === 'pm' ? 'Focus (min)' : 'Every (min)', '<input type="number" data-k="p" min="' + (w.t === 'pm' ? 1 : 5) + '" max="' + (w.t === 'pm' ? 180 : 240) + '">');
+    else if (k === 'p') h += opt(w.t === 'pm' ? 'Focus (min)' : w.t === 'tm' ? 'Minutes' : 'Every (min)', '<input type="number" data-k="p" min="' + (w.t === 'pm' || w.t === 'tm' ? 1 : 5) + '" max="' + (w.t === 'pm' || w.t === 'tm' ? 180 : 240) + '">');
     if (k === 'b') h += opt('Break (min)', '<input type="number" data-k="b" min="1" max="60">');
     if (k === 'gif') h += '<div class="row"><button class="ghost" id="pGif">' + (gifSrc[w.i] ? 'Choose another GIF' : 'Choose a GIF') + '</button> <span class="mute">' + gifLabel(w.i) + '</span></div>';
     if (k === 'pic') h += '<div class="row"><button class="ghost" id="pPic">' + (pics[w.i] ? 'Choose another picture' : 'Choose a picture') + '</button> <span class="mute">' + picLabel(w.i) + '</span></div>';
@@ -1971,7 +2007,7 @@ function simHandle(u) {
   if (id === 0x0F && p.length === 2 && p[0] === 4) return p[1] >= GIFS.SLOTS ? mk(1) : Object.assign(mk(0, sim.gifs[p[1]] ? Math.ceil(sim.gifs[p[1]].length / 1024) : 0), { crc: sim.gifs[p[1]] ? crc32(sim.gifs[p[1]]) : 0 });
   if (id === 0x0F && p.length === 2 && p[0] === 3) return p[1] >= SND.SLOTS ? mk(1) : Object.assign(mk(0, sim.snds[p[1]] ? Math.ceil(sim.snds[p[1]].length / 1024) : 0), { crc: sim.snds[p[1]] ? crc32(sim.snds[p[1]]) : 0 });
   if (id === 0x0F && p.length === 1) return Object.assign(mk(0, 2), { crc: sim.pics[p[0]] ? crc32(sim.pics[p[0]]) : 0 });
-  if (id === 0x0F) return mk(0, 4); // feature level 4
+  if (id === 0x0F) return mk(0, 5); // feature level 5
   if (id === 0x14) { if (p.length !== 1 || p[0] >= SND.SLOTS) return mk(1); sim.played = p[0]; return mk(0); }
   return mk(0);
 }
