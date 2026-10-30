@@ -116,6 +116,8 @@ void gifs_release(uint8_t slot) {
   for (auto &G : slots)
     if (G.used && !G.closed && G.slot == slot) {
       G.g->close(); // an open file must not be replaced or deleted
+      delete G.g; // and give the decoder's memory back: the board's own decode test of the new file needs a contiguous block of it
+      G.g = NULL;
       G.closed = true;
     }
 }
