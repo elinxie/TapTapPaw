@@ -233,6 +233,7 @@ Err parse_widget(P &p, Layout &L) {
       else if (key_is(key, kl, "g")) { e = int_in(p, 0, 65535, v); w.g = (uint16_t)v; }
       else if (key_is(key, kl, "i")) { e = int_in(p, 0, PICTURE_SLOTS - 1, v); w.i = (uint8_t)v; hi = true; }
       else if (key_is(key, kl, "n")) { e = int_in(p, 0, 31, v); w.n = (uint8_t)v; }
+      else if (key_is(key, kl, "u")) { e = int_in(p, 0, 4, v); w.u = (uint8_t)v; }
       else if (key_is(key, kl, "s")) {
         e = read_str(p, text, sizeof text, tl);
         if (!e && tl > MAX_TEXT_LEN) e = E_TEXT;
@@ -445,6 +446,23 @@ Err parse(const char *json, size_t len, Layout &out) {
 // ------------------------------------------------------------------------------------------------
 static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 
+static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+
+// Canonical 44-byte-header WAV only (what the page writes and what WAVFileReader reads): anything else is refused before it is kept.
+bool wav_check(const uint8_t *h, size_t n, uint32_t total, uint16_t *rate_out) {
+  if (!h || n < WAV_HEADER_BYTES || total < WAV_HEADER_BYTES + 2 || total > MAX_SOUND_BYTES) return false;
+  if (memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4) || memcmp(h + 12, "fmt ", 4) || memcmp(h + 36, "data", 4)) return false;
+  if (le32(h + 4) != total - 8) return false; // RIFF size covers the rest of the file
+  if (le32(h + 16) != 16 || le16(h + 20) != 1 || le16(h + 22) != 1) return false; // plain PCM, mono
+  uint32_t rate = le32(h + 24);
+  if (rate < SOUND_RATE_MIN || rate > SOUND_RATE_MAX) return false;
+  if (le32(h + 28) != rate * 2 || le16(h + 32) != 2 || le16(h + 34) != 16) return false; // 16-bit
+  uint32_t data = le32(h + 40);
+  if (data != total - WAV_HEADER_BYTES || (data & 1)) return false; // samples run to the end of the file, whole samples
+  if (rate_out) *rate_out = (uint16_t)rate;
+  return true;
+}
+
 size_t ack_encode(const Ack &a, uint8_t *o) {
   o[0] = 0xFF;
   o[1] = PKT_ACK;
@@ -496,10 +514,24 @@ Ack Session::handle(uint8_t id, const uint8_t *p, uint8_t n) {
     case PKT_CHUNK: return do_chunk(p, n);
     case PKT_END: return n == 0 ? do_end() : make(id, ST_BAD_PKT);
     case PKT_ABORT: return n == 0 ? do_abort() : make(id, ST_BAD_PKT);
-    case PKT_QUERY: // detail = feature level; with a slot byte the crc is that picture's
+    case PKT_QUERY: // detail = feature level; with a slot byte the crc is that picture's; [3, slot]: that custom sound (detail = KB)
       if (n == 1 && p[0] < PICTURE_SLOTS) return make(id, ST_OK, FEATURE_LEVEL, true, st.picture_crc(p[0]));
+      if (n == 2 && p[0] == KIND_PICTURE && p[1] < PICTURE_SLOTS) return make(id, ST_OK, FEATURE_LEVEL, true, st.picture_crc(p[1]));
+      if (n == 2 && p[0] == KIND_SOUND && p[1] < SOUND_SLOTS) {
+        uint32_t kb = (st.sound_size(p[1]) + 1023) / 1024;
+        return make(id, ST_OK, (uint8_t)(kb > 255 ? 255 : kb), true, st.sound_crc(p[1]));
+      }
       return n == 0 ? make(id, ST_OK, FEATURE_LEVEL) : make(id, ST_BAD_PKT);
+    case PKT_PLAY: // play one sound slot on the board (custom copy, else the original, else its beep)
+      if (n != 1 || p[0] >= SOUND_SLOTS) return make(id, ST_BAD_PKT);
+      return st.sound_play(p[0]) ? make(id, ST_OK) : make(id, ST_UNSUPPORTED);
     case PKT_RESET:
+      if (n == 2 && p[0] == KIND_SOUND && p[1] < SOUND_SLOTS) { // delete the custom copy of one sound: the original file is never touched
+        if (is_open && kind == KIND_SOUND && slot == p[1]) drop();
+        if (!st.sound_remove(p[1])) return make(id, ST_IO);
+        st.set_sound_crc(p[1], 0);
+        return make(id, ST_OK, 0, true, 0);
+      }
       if (n == 1 && p[0] < PICTURE_SLOTS) { // delete one picture
         if (is_open && kind == KIND_PICTURE && slot == p[0]) drop();
         if (!st.picture_remove(p[0])) return make(id, ST_IO);
@@ -521,11 +553,12 @@ Ack Session::do_begin(const uint8_t *p, uint8_t n) {
   if (n != 11) return make(PKT_BEGIN, ST_BAD_PKT);
   uint8_t k = p[0], sl = p[1], v = p[2];
   uint32_t tot = le32(p + 3), crc = le32(p + 7);
-  if (k > KIND_ART) return make(PKT_BEGIN, ST_BAD_PKT);
+  if (k > KIND_SOUND) return make(PKT_BEGIN, ST_BAD_PKT);
   if (k == KIND_PICTURE && sl >= PICTURE_SLOTS) return make(PKT_BEGIN, ST_BAD_PKT);
+  if (k == KIND_SOUND && (sl >= SOUND_SLOTS || tot < WAV_HEADER_BYTES + 2)) return make(PKT_BEGIN, ST_BAD_PKT);
   if (v != SCHEMA_VERSION) return make(PKT_BEGIN, ST_INVALID, E_VERSION);
   if (tot == 0) return make(PKT_BEGIN, ST_BAD_PKT);
-  uint32_t cap = k == KIND_LAYOUT ? MAX_LAYOUT_BYTES : k == KIND_PICTURE ? MAX_PICTURE_BYTES : MAX_ART_BYTES;
+  uint32_t cap = k == KIND_LAYOUT ? MAX_LAYOUT_BYTES : k == KIND_PICTURE ? MAX_PICTURE_BYTES : k == KIND_SOUND ? MAX_SOUND_BYTES : MAX_ART_BYTES;
   if (tot > cap) return make(PKT_BEGIN, ST_TOO_BIG, k == KIND_LAYOUT ? E_TOO_BIG : 0);
   if (is_open && kind == k && slot == sl && ver == v && total == tot && want_crc == crc) return make(PKT_BEGIN, ST_OK); // resume: ack carries next_seq
   drop();
@@ -624,7 +657,7 @@ Ack Session::do_end() {
 
 // Pictures are too big to read back into RAM: stream them back for the crc and check the format's markers.
 Ack Session::end_picture() {
-  uint8_t head[22] = {0}, tail[2] = {0};
+  uint8_t head[WAV_HEADER_BYTES] = {0}, tail[2] = {0};
   uint32_t crc = 0;
   size_t n = 0;
   if (!st.tmp_scan(crc, n, head, sizeof head, tail) || n != total) {
@@ -636,7 +669,8 @@ Ack Session::end_picture() {
     return make(PKT_END, ST_CRC);
   }
   bool ok;
-  if (kind == KIND_PICTURE) { // LVGL SJPG: "_SJPG__\0V1.00\0", width u16, height u16, splits u16, split height u16
+  if (kind == KIND_SOUND) ok = wav_check(head, n < sizeof head ? n : sizeof head, (uint32_t)n);
+  else if (kind == KIND_PICTURE) { // LVGL SJPG: "_SJPG__\0V1.00\0", width u16, height u16, splits u16, split height u16
     uint16_t w = (uint16_t)(head[14] | (head[15] << 8)), h = (uint16_t)(head[16] | (head[17] << 8)), parts = (uint16_t)(head[18] | (head[19] << 8));
     ok = n > 22 && memcmp(head, "_SJPG__", 7) == 0 && w >= 1 && w <= SCREEN_W && h >= 1 && h <= SCREEN_H && parts >= 1;
   } else { // plain baseline JPEG
@@ -649,6 +683,13 @@ Ack Session::end_picture() {
   if (!st.tmp_commit(kind, slot)) {
     drop();
     return make(PKT_END, ST_IO);
+  }
+  if (kind == KIND_SOUND) { // a sound has no decoder test: the header check above is the test
+    st.set_sound_crc(slot, want_crc);
+    is_open = false;
+    received = 0;
+    next_seq = 0;
+    return make(PKT_END, ST_OK, 0, true, want_crc);
   }
   if (!st.picture_check(kind, slot)) { // stored, but the board cannot decode it: remove it again
     if (kind == KIND_PICTURE) {

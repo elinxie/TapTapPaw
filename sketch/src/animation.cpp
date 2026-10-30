@@ -1,6 +1,7 @@
 #include "animation.h"
 #include "accessory.h"
 #include "layout.h"
+#include "sounds.h"
 void cat_heart(); // layout.cpp
 #include "ui/ui.h"
 //=========================== custom animation task ===========================
@@ -103,6 +104,7 @@ void pet_poll() {
   pet_pending = false;
   set_mood(MOOD_HAPPY);
   cat_heart();
+  if (sound_play(lc::SND_PET_TAP)) return; // custom "pet tap" sound
   playToneWithVolume(220, 12, 45);
   playToneWithVolume(180, 12, 45);
   playToneWithVolume(240, 12, 60);

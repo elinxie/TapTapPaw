@@ -272,6 +272,10 @@ struct MemStorage : Storage {
   std::string pics[8];
   uint32_t pic_crc[8] = {0};
   std::string art;
+  std::string snds[SOUND_SLOTS]; // custom sounds (/snd)
+  uint32_t snd_crc[SOUND_SLOTS] = {0};
+  std::string originals[SND_ORIGINALS]; // the board's original sound files: no upload or reset may ever change these
+  int played = -1;
   bool tmp_open(uint8_t k, uint8_t) override {
     kind = k;
     if (fail_open) return false;
@@ -311,6 +315,7 @@ struct MemStorage : Storage {
     if (fail_commit) return false;
     if (k == KIND_PICTURE) pics[slot] = tmp;
     else if (k == KIND_ART) art = tmp;
+    else if (k == KIND_SOUND) snds[slot] = tmp;
     else fin = tmp;
     tmp.clear();
     return true;
@@ -318,6 +323,11 @@ struct MemStorage : Storage {
   uint32_t picture_crc(uint8_t slot) override { return pics[slot].empty() ? 0 : pic_crc[slot]; }
   void set_picture_crc(uint8_t slot, uint32_t c) override { pic_crc[slot] = c; }
   bool picture_remove(uint8_t slot) override { pics[slot].clear(); return true; }
+  uint32_t sound_crc(uint8_t slot) override { return snds[slot].empty() ? 0 : snd_crc[slot]; }
+  uint32_t sound_size(uint8_t slot) override { return (uint32_t)snds[slot].size(); }
+  void set_sound_crc(uint8_t slot, uint32_t c) override { snd_crc[slot] = c; }
+  bool sound_remove(uint8_t slot) override { snds[slot].clear(); return true; } // only the custom copy
+  bool sound_play(uint8_t slot) override { played = slot; return true; }
   bool undecodable = false;
   bool picture_check(uint8_t, uint8_t) override { return !undecodable; }
   void tmp_discard() override {
@@ -409,7 +419,7 @@ static void test_upload_errors() {
   uint8_t p[11] = {0};
   CHECK(s.handle(PKT_BEGIN, p, 10).status == ST_BAD_PKT);
   CHECK(s.handle(PKT_BEGIN, p, 12).status == ST_BAD_PKT);
-  CHECK(begin(s, d, 3).status == ST_BAD_PKT); // kinds: 0 layout, 1 picture, 2 album art
+  CHECK(begin(s, d, 4).status == ST_BAD_PKT); // kinds: 0 layout, 1 picture, 2 album art, 3 sound
   CHECK(begin(s, d, 7).status == ST_BAD_PKT);
   CHECK(begin(s, d, 0, 2).status == ST_INVALID);
   CHECK(begin(s, d, 0, 1, 0).status == ST_BAD_PKT);
@@ -647,6 +657,154 @@ static void test_pictures() {
   s.handle(PKT_ABORT, nullptr, 0);
 }
 
+// A canonical WAV like the page writes: 44-byte header, mono 16-bit PCM, a quiet 220 Hz-ish square so the data is not all zero
+static std::string fake_wav(uint32_t samples, uint32_t rate = 16000) {
+  std::string w(44, '\0');
+  auto put32 = [&](size_t o, uint32_t v) { for (int i = 0; i < 4; i++) w[o + i] = (char)((v >> (8 * i)) & 0xFF); };
+  auto put16 = [&](size_t o, uint16_t v) { w[o] = (char)(v & 0xFF); w[o + 1] = (char)(v >> 8); };
+  memcpy(&w[0], "RIFF", 4); put32(4, 36 + samples * 2); memcpy(&w[8], "WAVE", 4); memcpy(&w[12], "fmt ", 4);
+  put32(16, 16); put16(20, 1); put16(22, 1); put32(24, rate); put32(28, rate * 2); put16(32, 2); put16(34, 16);
+  memcpy(&w[36], "data", 4); put32(40, samples * 2);
+  for (uint32_t i = 0; i < samples; i++) { int16_t v = (i / 36) % 2 ? 3000 : -3000; w.push_back((char)(v & 0xFF)); w.push_back((char)((v >> 8) & 0xFF)); }
+  return w;
+}
+
+static void test_wav_check() {
+  std::string w = fake_wav(1600);
+  uint16_t rate = 0;
+  CHECK(wav_check((const uint8_t *)w.data(), 44, (uint32_t)w.size(), &rate) && rate == 16000);
+  CHECK(wav_check((const uint8_t *)fake_wav(1600, 8000).data(), 44, 3244) && wav_check((const uint8_t *)fake_wav(1600, 24000).data(), 44, 3244));
+  CHECK(!wav_check(nullptr, 44, 3244) && !wav_check((const uint8_t *)w.data(), 43, 3244)); // short header
+  CHECK(!wav_check((const uint8_t *)w.data(), 44, 3243) && !wav_check((const uint8_t *)w.data(), 44, 3245)); // file size differs from the header's
+  CHECK(!wav_check((const uint8_t *)w.data(), 44, 44) && !wav_check((const uint8_t *)w.data(), 44, MAX_SOUND_BYTES + 2));
+  // every header field, wrong one at a time
+  struct Mut { size_t off; uint8_t val; const char *what; } muts[] = {
+    {0, 'X', "RIFF"}, {8, 'X', "WAVE"}, {12, 'X', "fmt "}, {16, 18, "fmt size"}, {20, 3, "float format"}, {20, 0, "format 0"}, {22, 2, "stereo"},
+    {34, 8, "8-bit"}, {32, 4, "alignment"}, {36, 'X', "data tag"}, {4, 0, "riff size"}, {40, 0, "data size"}, {28, 1, "byte rate"},
+  };
+  for (const Mut &m : muts) {
+    std::string b = w;
+    b[m.off] = (char)m.val;
+    CHECK(!wav_check((const uint8_t *)b.data(), 44, (uint32_t)b.size()));
+  }
+  std::string lo = fake_wav(1600, 7999), hi = fake_wav(1600, 24001); // the rate is in range only between 8000 and 24000
+  CHECK(!wav_check((const uint8_t *)lo.data(), 44, (uint32_t)lo.size()) && !wav_check((const uint8_t *)hi.data(), 44, (uint32_t)hi.size()));
+  std::string odd = w; odd.pop_back(); // half a sample at the end
+  CHECK(!wav_check((const uint8_t *)odd.data(), 44, (uint32_t)odd.size()));
+}
+
+static void test_sounds() {
+  MemStorage st;
+  Session s(st);
+  st.fin = "LAYOUT";
+  st.crc = 0x1111;
+  st.pics[2] = "PICTURE";
+  st.pic_crc[2] = 0x2222;
+  for (int i = 0; i < SND_ORIGINALS; i++) st.originals[i] = "ORIGINAL" + std::to_string(i);
+  auto originals_intact = [&]() { for (int i = 0; i < SND_ORIGINALS; i++) if (st.originals[i] != "ORIGINAL" + std::to_string(i)) return false; return true; };
+  CHECK(FEATURE_LEVEL == 3);
+  // one second of sound into the "pomodoro end" slot
+  std::string wav = fake_wav(16000);
+  uint32_t wc = crc32((const uint8_t *)wav.data(), wav.size());
+  CHECK(begin_kind(s, wav, KIND_SOUND, SND_POMO_END).status == ST_OK);
+  Ack a = send_all(s, wav);
+  CHECK(a.status == ST_OK && a.crc == wc && st.snds[SND_POMO_END] == wav && st.snd_crc[SND_POMO_END] == wc && !s.open());
+  CHECK(st.fin == "LAYOUT" && st.crc == 0x1111 && st.pics[2] == "PICTURE" && originals_intact()); // nothing else is touched
+  CHECK(!s.take_changed() && !s.take_pictures_changed());
+  // query [3, slot]: crc and size in KB (32044 bytes -> 32)
+  uint8_t qs[2] = {KIND_SOUND, SND_POMO_END};
+  a = s.handle(PKT_QUERY, qs, 2);
+  CHECK(a.status == ST_OK && a.crc == wc && a.detail == 32);
+  qs[1] = SND_REMINDER;
+  a = s.handle(PKT_QUERY, qs, 2);
+  CHECK(a.status == ST_OK && a.crc == 0 && a.detail == 0);
+  qs[1] = SOUND_SLOTS;
+  CHECK(s.handle(PKT_QUERY, qs, 2).status == ST_BAD_PKT);
+  uint8_t qbad[2] = {KIND_ART, 0}, qpic[2] = {KIND_PICTURE, 2}, q1[1] = {SND_POMO_END};
+  CHECK(s.handle(PKT_QUERY, qbad, 2).status == ST_BAD_PKT);
+  CHECK(s.handle(PKT_QUERY, qpic, 2).crc == 0x2222); // [1, slot] is the picture query
+  CHECK(s.handle(PKT_QUERY, q1, 1).status == ST_BAD_PKT); // a lone byte is still a picture slot (0..7): 9 is not one
+  CHECK(s.handle(PKT_QUERY, nullptr, 0).crc == 0x1111);
+  // begin: slot range, size range
+  CHECK(begin_kind(s, wav, KIND_SOUND, SOUND_SLOTS).status == ST_BAD_PKT);
+  CHECK(begin_kind(s, std::string(45, 'x'), KIND_SOUND, 0).status == ST_BAD_PKT); // too small to hold a sound
+  CHECK(begin_kind(s, std::string(MAX_SOUND_BYTES + 1, 'x'), KIND_SOUND, 0).status == ST_TOO_BIG);
+  std::string biggest = fake_wav((MAX_SOUND_BYTES - 44) / 2); // exactly 5 s at 16 kHz
+  CHECK(biggest.size() == MAX_SOUND_BYTES);
+  st.free_b = 400000;
+  CHECK(begin_kind(s, biggest, KIND_SOUND, SND_BUTTON4).status == ST_OK && send_all(s, biggest).status == ST_OK && st.snds[SND_BUTTON4] == biggest);
+  st.free_b = 200000;
+  // a replace keeps the old copy until the new one is whole
+  std::string wav2 = fake_wav(8000, 8000);
+  CHECK(begin_kind(s, wav2, KIND_SOUND, SND_POMO_END).status == ST_OK);
+  CHECK(st.snds[SND_POMO_END] == wav);
+  for (size_t j = 0; j < nchunks(wav2) / 2; j++) chunk(s, wav2, (uint16_t)j);
+  CHECK(st.snds[SND_POMO_END] == wav);
+  s.handle(PKT_ABORT, nullptr, 0);
+  CHECK(st.snds[SND_POMO_END] == wav);
+  CHECK(begin_kind(s, wav2, KIND_SOUND, SND_POMO_END).status == ST_OK && send_all(s, wav2).status == ST_OK && st.snds[SND_POMO_END] == wav2);
+  // a sound the board cannot play is refused whole, and the slot keeps what it had
+  struct Bad { size_t off; uint8_t val; } bads[] = {{0, 'X'}, {8, 'X'}, {16, 18}, {20, 3}, {22, 2}, {34, 8}, {36, 'X'}, {4, 1}, {40, 1}, {24, 0}};
+  for (const Bad &b : bads) {
+    std::string bw = wav;
+    bw[b.off] = (char)b.val;
+    CHECK(begin_kind(s, bw, KIND_SOUND, SND_REMINDER).status == ST_OK);
+    a = send_all(s, bw);
+    CHECK(a.status == ST_INVALID && st.snds[SND_REMINDER].empty() && !s.open());
+    CHECK(s.handle(PKT_END, nullptr, 0).status == ST_NO_SESSION);
+  }
+  std::string text(4000, 't'); // not a WAV at all
+  CHECK(begin_kind(s, text, KIND_SOUND, SND_REMINDER).status == ST_OK && send_all(s, text).status == ST_INVALID && st.snds[SND_REMINDER].empty());
+  std::string odd = wav; odd.pop_back();
+  CHECK(begin_kind(s, odd, KIND_SOUND, SND_REMINDER).status == ST_OK && send_all(s, odd).status == ST_INVALID);
+  st.undecodable = true; // the picture decoder test is not applied to sounds
+  CHECK(begin_kind(s, wav, KIND_SOUND, SND_REMINDER).status == ST_OK && send_all(s, wav).status == ST_OK && st.snds[SND_REMINDER] == wav);
+  st.undecodable = false;
+  // a flash read-back that differs, and a crc that does not match
+  st.corrupt_readback = true;
+  CHECK(begin_kind(s, wav, KIND_SOUND, SND_BUTTON1).status == ST_OK && send_all(s, wav).status == ST_CRC && st.snds[SND_BUTTON1].empty());
+  st.corrupt_readback = false;
+  CHECK(begin(s, wav, KIND_SOUND, 1, -1, 0x12345678).status == ST_OK);
+  for (size_t j = 0; j < nchunks(wav); j++) chunk(s, wav, (uint16_t)j);
+  CHECK(s.handle(PKT_END, nullptr, 0).status == ST_CRC && st.snds[0].empty());
+  // no room: refused before anything is written
+  st.free_b = 30000;
+  CHECK(begin_kind(s, wav, KIND_SOUND, SND_BUTTON2).status == ST_NO_SPACE);
+  st.free_b = 200000;
+  st.fail_commit = true;
+  CHECK(begin_kind(s, wav, KIND_SOUND, SND_BUTTON2).status == ST_OK && send_all(s, wav).status == ST_IO && st.snds[SND_BUTTON2].empty());
+  st.fail_commit = false;
+  // interrupted upload, resumed from where it stopped
+  CHECK(begin_kind(s, wav, KIND_SOUND, SND_BUTTON3).status == ST_OK);
+  for (int j = 0; j < 40; j++) chunk(s, wav, (uint16_t)j);
+  a = begin_kind(s, wav, KIND_SOUND, SND_BUTTON3);
+  CHECK(a.status == ST_OK && a.seq == 40);
+  for (size_t j = 40; j < nchunks(wav); j++) chunk(s, wav, (uint16_t)j);
+  CHECK(s.handle(PKT_END, nullptr, 0).status == ST_OK && st.snds[SND_BUTTON3] == wav);
+  // delete the custom copy: only that file, the layout, pictures and originals stay
+  uint8_t rs[2] = {KIND_SOUND, SND_POMO_END};
+  CHECK(s.handle(PKT_RESET, rs, 2).status == ST_OK && st.snds[SND_POMO_END].empty() && st.snd_crc[SND_POMO_END] == 0);
+  a = s.handle(PKT_QUERY, rs, 2);
+  CHECK(a.crc == 0 && a.detail == 0 && !st.snds[SND_BUTTON3].empty());
+  CHECK(st.fin == "LAYOUT" && st.crc == 0x1111 && st.pics[2] == "PICTURE" && originals_intact());
+  CHECK(s.handle(PKT_RESET, rs, 2).status == ST_OK); // deleting what is not there is fine
+  rs[1] = SOUND_SLOTS;
+  CHECK(s.handle(PKT_RESET, rs, 2).status == ST_BAD_PKT);
+  rs[0] = KIND_ART; rs[1] = 0;
+  CHECK(s.handle(PKT_RESET, rs, 2).status == ST_BAD_PKT);
+  rs[0] = KIND_SOUND; rs[1] = SND_BUTTON1;
+  CHECK(begin_kind(s, wav, KIND_SOUND, SND_BUTTON1).status == ST_OK); // a reset of the slot being uploaded drops that upload
+  chunk(s, wav, 0);
+  CHECK(s.handle(PKT_RESET, rs, 2).status == ST_OK && !s.open());
+  // PLAY
+  uint8_t pl = SND_PET_TAP;
+  CHECK(s.handle(PKT_PLAY, &pl, 1).status == ST_OK && st.played == SND_PET_TAP);
+  pl = SOUND_SLOTS;
+  CHECK(s.handle(PKT_PLAY, &pl, 1).status == ST_BAD_PKT);
+  CHECK(s.handle(PKT_PLAY, nullptr, 0).status == ST_BAD_PKT && s.handle(PKT_PLAY, rs, 2).status == ST_BAD_PKT);
+  CHECK(originals_intact());
+}
+
 int main() {
   test_crc();
   test_parse_good();
@@ -658,6 +816,8 @@ int main() {
   test_upload_invalid_layout();
   test_upload_interrupted_and_resume();
   test_pictures();
+  test_wav_check();
+  test_sounds();
   printf("layout_core: %d checks passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

@@ -18,7 +18,19 @@ constexpr uint8_t MAX_TEXT_LEN = 24;
 constexpr uint16_t CHUNK_BYTES = 192; // fixed chunk size: chunk n starts at byte n * 192
 constexpr uint32_t MAX_PICTURE_BYTES = 65536; // upload kind 1: an SJPG picture stored in LittleFS (/img/<slot>.sjpg)
 constexpr uint32_t MAX_ART_BYTES = 12288; // upload kind 2: album art, a plain 96x96 JPEG kept in RAM only
-enum Kind : uint8_t { KIND_LAYOUT = 0, KIND_PICTURE = 1, KIND_ART = 2 };
+constexpr uint8_t SOUND_SLOTS = 15; // upload kind 3: a custom sound (canonical 44-byte-header WAV) in LittleFS /snd/<slot>.wav
+constexpr uint32_t WAV_HEADER_BYTES = 44;
+constexpr uint32_t MAX_SOUND_BYTES = WAV_HEADER_BYTES + 5 * 16000 * 2; // 5 s of 16 kHz mono 16-bit
+constexpr uint16_t SOUND_RATE_MIN = 8000, SOUND_RATE_MAX = 24000; // what the page may resample to
+enum Kind : uint8_t { KIND_LAYOUT = 0, KIND_PICTURE = 1, KIND_ART = 2, KIND_SOUND = 3 };
+// Sound slots. 0..7 have an original file on the board (connect.wav ...); a custom copy in /snd is played instead while it exists.
+// 8..14 have no file of their own: without a custom copy the board uses its built-in beeps.
+enum SoundSlot : uint8_t {
+  SND_CONNECT = 0, SND_DISCONNECT, SND_CLIMATE_SUNNY, SND_CLIMATE_CLOUDY, SND_CLIMATE_RAINY, SND_CLIMATE_STORMY, SND_CLIMATE_SNOWY, SND_CLIMATE_NIGHT,
+  SND_PET_TAP, SND_POMO_END, SND_REMINDER, SND_BUTTON1, SND_BUTTON2, SND_BUTTON3, SND_BUTTON4, // button widget key "u" = 1..4
+  SND_COUNT
+};
+constexpr uint8_t SND_ORIGINALS = 8; // slots below this have an original sound file
 constexpr uint16_t SCREEN_W = 240; // portrait: panel 240x320, rotation 0/2 (LGFX_CYD.h)
 constexpr uint16_t SCREEN_H = 320;
 
@@ -29,8 +41,11 @@ enum WType : uint8_t {
   W_PET, // ASCII pet (src/pets), fixed 160x132, species in "n"
   W_COUNT
 };
+// Does `h` (the first WAV_HEADER_BYTES bytes) describe a sound the board can play, in a file of `total` bytes? Canonical layout only:
+// RIFF/WAVE, "fmt " (16 bytes, PCM, mono, 16-bit, rate SOUND_RATE_MIN..MAX), "data" running to the end of the file. Same rules as the page.
+bool wav_check(const uint8_t *h, size_t n, uint32_t total, uint16_t *rate_out = nullptr);
 // What this firmware understands; reported in the QUERY ack's detail byte (older firmware answers 0).
-constexpr uint8_t FEATURE_LEVEL = 2;
+constexpr uint8_t FEATURE_LEVEL = 3;
 constexpr uint8_t PICTURE_SLOTS = 8;
 
 // Button widget actions ("e"). Arg ("g") only for the ones marked.
@@ -65,6 +80,7 @@ struct Widget {
   uint16_t g; // button action argument
   uint8_t i; // picture slot
   uint8_t n; // pet species
+  uint8_t u; // button: press sound, 0 = the default click, 1..4 = custom sound slot SND_BUTTON1..4 (feature level 3)
 };
 
 struct Page {
@@ -121,11 +137,13 @@ inline uint32_t crc32(const uint8_t *data, size_t n) { return crc32_update(0, da
 //   0x0C CHUNK : [seq u16 LE][data 1..192]                                   chunk n = bytes n*192 ..
 //   0x0D END   : (empty)                                                     verify, validate, commit atomically
 //   0x0E ABORT : (empty)
-//   0x0F QUERY : (empty) or [slot]                                           ack carries state; with a slot, crc = that picture's
-//   0x11 RESET : (empty) or [slot]                                           delete the layout (pictures stay), or one picture
+//   0x0F QUERY : (empty), [slot] or [kind, slot]                             ack carries state; [slot] = that picture's crc; [3, slot] = that
+//                                                                            custom sound's crc (detail = its size in KB, 0 = none)
+//   0x11 RESET : (empty), [slot] or [kind, slot]                             delete the layout (pictures stay), one picture, or one custom sound
+//   0x14 PLAY  : [slot]                                                      play that sound slot now (custom copy, else the original, else a beep)
 // Board -> host 0x10 ACK: [cmd][status][detail][flags][seq u16 LE][free_kb u16 LE][crc32 u32 LE]  (payload 12 bytes)
 // ---------------------------------------------------------------------------------------------
-enum PktId : uint8_t { PKT_BEGIN = 0x0B, PKT_CHUNK = 0x0C, PKT_END = 0x0D, PKT_ABORT = 0x0E, PKT_QUERY = 0x0F, PKT_ACK = 0x10, PKT_RESET = 0x11 };
+enum PktId : uint8_t { PKT_BEGIN = 0x0B, PKT_CHUNK = 0x0C, PKT_END = 0x0D, PKT_ABORT = 0x0E, PKT_QUERY = 0x0F, PKT_ACK = 0x10, PKT_RESET = 0x11, PKT_PLAY = 0x14 };
 
 enum Status : uint8_t {
   ST_OK = 0,
@@ -172,6 +190,12 @@ class Storage {
   virtual uint32_t picture_crc(uint8_t slot) = 0; // 0 if the slot is empty
   virtual void set_picture_crc(uint8_t slot, uint32_t crc) = 0;
   virtual bool picture_remove(uint8_t slot) = 0;
+  // custom sounds (kind 3): /snd/<slot>.wav next to, never over, the original files
+  virtual uint32_t sound_crc(uint8_t slot) = 0; // 0 if there is no custom copy
+  virtual uint32_t sound_size(uint8_t slot) = 0; // bytes of the custom copy, 0 if none
+  virtual void set_sound_crc(uint8_t slot, uint32_t crc) = 0;
+  virtual bool sound_remove(uint8_t slot) = 0; // delete the custom copy only
+  virtual bool sound_play(uint8_t slot) = 0; // play the slot the way the board would for its event
   // after a picture / album art is stored: can the board's own decoder read it? (firmware: LVGL SJPG/JPEG decode test)
   virtual bool picture_check(uint8_t kind, uint8_t slot) { (void)kind; (void)slot; return true; }
 };

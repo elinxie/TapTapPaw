@@ -50,7 +50,9 @@ void beep() {
  // initSpeaker();
   playToneWithVolume(2000, volume, 250);
 }
+volatile uint32_t click_mute_until = 0; // millis(): a custom sound is starting, skip the click tone until then
 void clickSound() {//keyboard click sound
+  if ((int32_t)(millis() - click_mute_until) < 0) return;
  // initSpeaker();
   playToneWithVolume(8000, volume, 1);
   

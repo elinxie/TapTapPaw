@@ -61,6 +61,29 @@ Spotify again once, and Spotify Premium).
 
 `node web-sync/test-layout.mjs` and `node web-sync/test-editor.mjs` test the layout code and the editor model.
 
+### Sounds (upload kind 3, packets `0x0F` / `0x11` with `[3, slot]`, `0x14`)
+
+The **Sounds** section (under the builder) lists the board's 15 sound slots: connected, disconnected, six weather sounds, pet tap,
+pomodoro end, reminder and four button sounds. For each slot:
+
+1. **Choose file** takes any audio the browser can decode (wav, mp3, m4a, ogg, flac...). The page converts it in the browser (nothing
+   leaves your computer): mono, 16 kHz (or 11 kHz / 8 kHz to save space), cut with **Start** and **Length** (at most 5 s), optional
+   **trim silence** and **make it loud**. The waveform shows the part that is kept.
+2. **Preview** plays the *converted* result, so what you hear is what the board gets.
+3. **Use and send to board** (or **Use**, then **Send** later) uploads it. The page asks the board for its feature level and free space
+   first and says so if the sound does not fit. A progress bar shows the upload (about 3.9 KB/s: a 1 s sound takes 8 s, 5 s takes 41 s).
+4. **Play on board** plays the slot on the board the way it would for its event (your copy, else the original, else the built-in beep).
+5. **Reset sound** deletes only your copy from the board (after asking). The original sound or the built-in beep plays again.
+
+**Check board** asks the board which slots hold a custom sound (and how big) and shows the free storage, which pictures share. Names of
+sounds are remembered per browser for the sounds it sent; a sound sent from somewhere else shows as "sent from somewhere else".
+The audio itself is not kept in the browser: the board is the store (choose the file again to change a sound).
+
+Button sounds: select a Button widget in the builder and set **Press sound** to Custom 1..4. The layout then needs firmware
+feature level 3; the page checks before sending.
+
+`node web-sync/test-sounds.mjs` tests the conversion code and the upload driver.
+
 ### What a browser page cannot do
 
 | Missing | Why |

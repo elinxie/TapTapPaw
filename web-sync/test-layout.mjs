@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const code = html.split('<script>')[1].split('// ---- UI ----')[0];
-const lib = new Function(code + '; return { pkt, LAYOUT, LAYOUT_ERRORS, crc32, validateLayout, layoutBeginPacket, layoutChunkPacket, layoutChunkCount, layoutEndPacket, layoutAbortPacket, layoutQueryPacket, layoutResetPacket, parseLayoutAck, uploadLayoutBytes };')();
+const lib = new Function(code + '; return { pkt, LAYOUT, LAYOUT_ERRORS, crc32, validateLayout, layoutBeginPacket, layoutChunkPacket, layoutChunkCount, layoutEndPacket, layoutAbortPacket, layoutQueryPacket, layoutResetPacket, parseLayoutAck, uploadLayoutBytes, wavEncode, wavCheck, mixToMono, resample, prepareSound, soundBytesFit, soundFitSeconds, playPacket, SND, SOUND_SLOTS };')();
 const arr = (u8) => Array.from(u8);
 const enc = (s) => new TextEncoder().encode(s);
 const here = (p) => new URL(p, import.meta.url);

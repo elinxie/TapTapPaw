@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - Added: tap the cat (or a pet) to pet it; "Waiting cat" setting: cheerful (default) or sleepy (original).
 - Added: `esp32dev_ble` build: the board is also a Bluetooth keyboard for button shortcuts and media keys.
 - Changed: layout uploads are 3.3x faster (free-space reading cached during uploads).
+- Added: custom sounds (Phase 4a): the web page converts any audio file to the board's WAV format, previews it and uploads it to one of 15 sound slots (connected, disconnected, weather, pet tap, pomodoro end, reminder, four button sounds). Stored as `/snd/<slot>.wav` next to the originals; "Reset sound" deletes only the custom copy. Upload kind 3, `[3, slot]` query/reset, PLAY packet `0x14`, button widget key `u`, feature level 3.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 

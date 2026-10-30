@@ -4,6 +4,10 @@
   layout_tool.py info   [--port P]            query: free space, stored layout crc, flags
   layout_tool.py upload FILE.json [--port P]  validate nothing locally, send, verify the crc read back from the board
   layout_tool.py reset  [--port P]            delete the stored layout (back to the built-in screens)
+  layout_tool.py picture FILE.sjpg --slot N   upload a picture into slot 0..7
+  layout_tool.py sound FILE.wav --slot N      upload a custom sound (canonical mono 16-bit WAV, <= 5 s) into sound slot 0..14
+  layout_tool.py soundreset --slot N          delete only the custom copy of sound slot N (originals stay)
+  layout_tool.py play --slot N                play sound slot N on the board
 
 The normal way to do this is the web page; this exists for tests and for debugging without a browser.
 Quit the TapTapPaw desktop app first: only one program can hold the serial port.
@@ -23,6 +27,14 @@ ERRORS = ["ok", "empty", "too big", "syntax error", "nested too deep", "unsuppor
           "second main page", "too many widgets", "unknown widget type", "widget outside the 240x320 screen", "bad color",
           "value out of range", "bad text", "text pool full", "trailing data"]
 ST = {n: i for i, n in enumerate(STATUS)}
+
+
+def make_wav(samples, rate=16000, hz=880, amp=1200, silent=False):
+    """Canonical 44-byte-header mono 16-bit WAV, the format the board accepts for kind 3 (docs/WIDGETS.md)."""
+    import math
+    pcm = b"".join(struct.pack("<h", 0 if silent else int(amp * math.sin(2 * math.pi * hz * i / rate))) for i in range(samples))
+    hdr = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+    return hdr + b"data" + struct.pack("<I", len(pcm)) + pcm
 
 
 def pkt(pid, payload=b""):
@@ -164,15 +176,15 @@ class Board:
             self.ser.read(256)
         self.buf = b""
 
-    def upload_kind(self, data, kind, slot, window=1):
-        """Picture (kind 1, slot 0..7) or album art (kind 2). The END ack carries the crc the board read back."""
+    def upload_kind(self, data, kind, slot, window=1, end_timeout=5.0):
+        """Picture (kind 1, slot 0..7), album art (kind 2) or custom sound (kind 3, slot 0..14). The END ack carries the crc the board read back."""
         a = self.call(begin_pkt(data, kind=kind, slot=slot), 0x0B)
         if not a or a.status != 0:
             return False, a
         a = self.send_chunks(data, a.seq, window)
         if not a or a.status not in (0, ST["bad sequence"]):
             return False, a
-        a = self.call(pkt(0x0D), 0x0D, timeout=5.0)  # the board test-decodes the picture before it answers
+        a = self.call(pkt(0x0D), 0x0D, timeout=end_timeout)  # the board test-decodes the picture / reads the sound back before it answers
         return bool(a and a.status == 0 and a.crc == zlib.crc32(data)), a
 
     def picture_crc(self, slot):
@@ -180,6 +192,17 @@ class Board:
 
     def remove_picture(self, slot):
         return self.call(pkt(0x11, bytes([slot])), 0x11)
+
+    def sound_crc(self, slot):
+        """QUERY [3, slot]: crc of that custom sound (0 = none), detail = its size in KB."""
+        return self.call(pkt(0x0F, bytes([3, slot])), 0x0F)
+
+    def remove_sound(self, slot):
+        """RESET [3, slot]: delete the custom copy only; the original sound file is not touched."""
+        return self.call(pkt(0x11, bytes([3, slot])), 0x11)
+
+    def play(self, slot):
+        return self.call(pkt(0x14, bytes([slot])), 0x14)
 
     def upload(self, data, log=print):
         n = (len(data) + CHUNK - 1) // CHUNK
@@ -208,8 +231,8 @@ class Board:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["info", "upload", "reset", "picture"])
-    ap.add_argument("--slot", type=int, default=0, help="picture slot 0..7 (picture command)")
+    ap.add_argument("cmd", choices=["info", "upload", "reset", "picture", "sound", "soundreset", "play"])
+    ap.add_argument("--slot", type=int, default=0, help="picture slot 0..7 (picture), sound slot 0..14 (sound, soundreset, play)")
     ap.add_argument("file", nargs="?")
     ap.add_argument("--port")
     args = ap.parse_args()
@@ -219,6 +242,14 @@ def main():
             print(b.query())
         elif args.cmd == "reset":
             print(b.reset_layout())
+        elif args.cmd == "sound":
+            ok, a = b.upload_kind(open(args.file, "rb").read(), 3, args.slot, end_timeout=8.0)
+            print(("OK: " if ok else "FAILED: ") + repr(a))
+            sys.exit(0 if ok else 1)
+        elif args.cmd == "soundreset":
+            print(b.remove_sound(args.slot))
+        elif args.cmd == "play":
+            print(b.play(args.slot))
         elif args.cmd == "picture":
             ok, a = b.upload_kind(open(args.file, "rb").read(), 1, args.slot)
             print(("OK: " if ok else "FAILED: ") + repr(a))
