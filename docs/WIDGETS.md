@@ -5,8 +5,8 @@ The board can show a **layout** instead of its built-in main screen: several pag
 board over USB; the firmware reads it and builds the screens.
 
 Status: **Phase 1** (layout engine + upload protocol), **Phase 2** (the builder on the web page) and **Phase 3** (typing cat, timers,
-buttons, Bluetooth keys, Spotify controls, pictures, album art, pets; see "Phase 3 widgets" below) are done. Planned next: a GIF
-widget and a one-tap timer button.
+buttons, Bluetooth keys, Spotify controls, pictures, album art, pets; see "Phase 3 widgets" below) are done. **Phase 4a** adds custom
+sounds (see "Custom sounds" below). Planned next: a GIF widget and a one-tap timer button.
 
 ## Using the builder (web page)
 
@@ -108,7 +108,7 @@ The page asks the board (QUERY, `detail` = feature level) before sending; an old
 | `sw` | stopwatch | `z`, `c` | tap start/stop, hold reset |
 | `dt` | date | `k` format 0 `Thu 29 Oct`, 1 `2026-10-29`, 2 `October 29`; `z`, `a`, `c` | date from packet `0x12` (the web page sends it every minute) |
 | `fs` | focus sign | `s` busy text (`Focus`) | tap busy/available; the board LED follows (red / green) while it is in the layout |
-| `bt` | button | `e` action (required), `s` label (required), `g` argument, `z`, `c`, `r` | actions below |
+| `bt` | button | `e` action (required), `s` label (required), `g` argument, `u` press sound 0..4 (feature level 3), `z`, `c`, `r` | actions below |
 | `sp` | Spotify controls | `c` | previous / play-pause / next, done by the web page (Spotify Premium) |
 | `aa` | album art | | fixed 96x96; the cover the web page sends (JPEG, RAM only) |
 | `rm` | reminder | `k` 0 water, 1 stretch, 2 breathe; `p` every 5..240 min (30), `z` | beep, cat smiles, note; tap = done |
@@ -120,6 +120,41 @@ The page asks the board (QUERY, `detail` = feature level) before sending; an old
 15-17 Spotify play-pause / next / previous (web page), 18 event to the page (`g` = number, packet `0x13`), 19 Bluetooth key
 (`g` = modifiers << 8 | HID usage; modifiers 1 Ctrl, 2 Shift, 4 Alt, 8 Cmd/Win), 20 Bluetooth media key (`g` 0 play/pause,
 1 next, 2 previous, 3 volume up, 4 volume down, 5 mute). Bluetooth actions need the Bluetooth build (below); otherwise they show a note.
+
+### Custom sounds
+
+*Firmware feature level 3.* The web page's **Sounds** section turns any audio file into a sound the board can play and sends it to one
+of **15 sound slots**. Your copy is stored as `/snd/<slot>.wav` in LittleFS, **next to the original files and never over them**
+(`connect.wav`, `climate_*.wav` stay in the root of the partition). Playback prefers your copy; **Reset sound** deletes only your copy,
+so the original (or the built-in beep) plays again.
+
+| Slot | Plays when | Without a custom copy |
+|------|------------|-----------------------|
+| 0 Connected, 1 Disconnected | the desktop app or page connects / the connection drops | `connect.wav`, `disconnect.wav` |
+| 2-7 Weather: sunny, cloudy, rainy, stormy, snowy, night | the weather group changes | `climate_<name>.wav` |
+| 8 Pet tap | you tap the cat (any screen) or a pet widget | soft purr (cat), click (pet widget) |
+| 9 Pomodoro end | a work or break period ends | two beeps |
+| 10 Reminder | a reminder widget goes off | two beeps |
+| 11-14 Button sound 1-4 | a button widget with `"u":1`..`4` is tapped | the click |
+
+A button with `u` set plays that sound *instead of* the click (the click is muted for 0.4 s so the two do not overlap); the button's
+action still runs. `u` is ignored on other widget types, `0` is the default click.
+
+**Format the board accepts** (checked on the board before anything is kept, the same rules as the page): a canonical WAV: 44-byte
+header (`RIFF`, `fmt ` 16 bytes, `data` to the end of the file), PCM, **mono, 16-bit, 8000-24000 Hz**, an even number of data bytes,
+at most **160,044 bytes** (5 s at 16 kHz). The page always writes 16 kHz (or 11.025 / 8 kHz if you pick a lower quality: half the
+space). Anything else is refused at END and the slot keeps what it had. Sounds are played by the existing audio task (8-bit DAC,
+global volume and mute apply).
+
+**Space**: the LittleFS partition (about 190 KB free with no pictures) is shared by the layout, pictures and sounds. The first sound
+creates the `/snd` folder, which keeps 8 KB for good (measured: a LittleFS directory is two blocks); after that a 1 s sound at
+16 kHz is 32 KB; the 5 s maximum takes 157 KB, so you can hold roughly six 1 s sounds, or one 5 s sound and little else. The board
+refuses an upload before writing anything when the free space is below size + 8 KB (a replaced slot keeps its old copy until the new
+one is complete, so replacing needs room for both). The page shows the free space and how many seconds it holds.
+
+The page cuts the file (start, length <= 5 s), can trim silence at both ends, brings quiet sounds up to 90 % of full scale (never more
+than 8x), fades the first and last 6 ms so there is no click, converts to mono and to the chosen rate with the browser's own
+resampler, and lets you preview the converted result before it is sent.
 
 ### Pictures
 
@@ -192,12 +227,13 @@ packets `0x01`-`0x0A` are unchanged. Stop-and-wait: send one packet, wait for it
 
 | id | name | payload |
 |----|------|---------|
-| `0x0B` | BEGIN | `kind` (0 layout, 1 picture, 2 album art), `slot` (picture 0..7), `schema version`, `total u32 LE`, `crc32 u32 LE` (11 bytes) |
+| `0x0B` | BEGIN | `kind` (0 layout, 1 picture, 2 album art, 3 sound), `slot` (picture 0..7, sound 0..14), `schema version`, `total u32 LE`, `crc32 u32 LE` (11 bytes) |
 | `0x0C` | CHUNK | `seq u16 LE`, 1..192 data bytes. Chunk n holds bytes n*192 .. n*192+191; every chunk but the last is exactly 192 bytes |
 | `0x0D` | END | empty: verify, validate, commit |
 | `0x0E` | ABORT | empty: drop the upload in progress |
-| `0x0F` | QUERY | empty: report state, no side effects (`detail` = feature level, 2 since Phase 3); `[slot]`: `crc32` of that picture |
-| `0x11` | RESET | empty: delete the stored layout, back to the built-in screens; `[slot]`: delete that picture |
+| `0x0F` | QUERY | empty: report state, no side effects (`detail` = feature level, 3 since Phase 4a); `[slot]`: `crc32` of that picture; `[3, slot]`: `crc32` of that custom sound (0 = none) and its size in KB in `detail` |
+| `0x11` | RESET | empty: delete the stored layout, back to the built-in screens; `[slot]`: delete that picture; `[3, slot]`: delete the custom copy of that sound (the original file is never touched) |
+| `0x14` | PLAY | `slot` 0..14: play that sound slot now, as the board would for its event (custom copy, else the original, else the built-in beep); acked with status 0 |
 | `0x12` | DATE (host to board) | `year-2000`, `month`, `day`, `weekday 0..6` |
 | `0x13` | EVENT (board to host) | `action`, `arg u16 LE`: a button the page acts on (Spotify, event); sent only while the page is the data source |
 | `0x10` | ACK (board to host) | `cmd`, `status`, `detail`, `flags`, `seq u16`, `free_kb u16`, `crc32 u32` (12 bytes) |
@@ -212,7 +248,9 @@ the stored layout's checksum (0 = none), `free_kb` the free space of the LittleF
 - **Resume**: BEGIN with the same kind/slot/size/crc as the upload in progress answers `seq` = the next missing chunk. A reset or power
   loss drops the partial upload (the stored layout is untouched); start again from chunk 0.
 - **Verify**: after END, send QUERY: `crc32` must equal the checksum of what you sent.
-- Pictures (kind 1) are at most 65,536 bytes, album art (kind 2, kept in RAM, not flash) at most 12,288 bytes.
+- Pictures (kind 1) are at most 65,536 bytes, album art (kind 2, kept in RAM, not flash) at most 12,288 bytes, sounds (kind 3) at most
+  160,044 bytes (and at least 46: a header and one sample). A sound's END ack carries the crc the board read back from flash; a file
+  that is not a canonical mono 16-bit WAV in 8000-24000 Hz answers `invalid layout` with detail 0 and is not kept.
 - Speed: about 3.9 KB/s (a 4 KB layout in about 1 s). Sending several chunks before waiting for acks was tried and lost bytes while the
   board writes to flash, so uploads stay stop-and-wait.
 - A BEGIN larger than 4096 bytes, an unknown version or kind, or too little free space is refused before anything is written.
@@ -226,12 +264,14 @@ The page code is in `web-sync/index.html` (`validateLayout`, `layoutBeginPacket`
 scripts/test-layout-core.sh          # firmware parser + upload state machine on the host (g++, ASan/UBSan, mutation fuzz)
 node web-sync/test-layout.mjs        # page validator (same shared cases), packets, ack decoding, upload driver
 node web-sync/test-packets.mjs       # existing packets, unchanged
+node web-sync/test-sounds.mjs        # sounds: WAV encode/check, resampling, trim/normalize/fade, free-space maths, upload driver
 ~/.venvs/pio39/bin/python scripts/layout_smoke_test.py   # real board over USB (quit the desktop app first); ends with RESET
 ~/.venvs/pio39/bin/python scripts/layout_tool.py upload docs/layout-example.json
 ~/.venvs/pio39/bin/python scripts/layout_tool.py info | reset
+~/.venvs/pio39/bin/python scripts/layout_tool.py sound clip.wav --slot 9 | soundreset --slot 9 | play --slot 9
 ```
 
-`sketch/test/host/layout-cases.tsv` is a table of 116 layouts with the expected verdict; the firmware parser and the page validator must
+`sketch/test/host/layout-cases.tsv` is a table of 122 layouts with the expected verdict; the firmware parser and the page validator must
 both agree with every row.
 
 ## Measured size (build flags `-DINVERT_COLORS_DEFAULT=1`)
@@ -242,6 +282,17 @@ both agree with every row.
 | `esp32dev` RAM (static) | 57,552 B (17.6 %) | 59,752 B (18.2 %) | +2,200 B |
 | `esp32dev_wifi` flash (2,883,584 B partition) | 1,950,537 B (67.6 %) | 1,966,785 B (68.2 %) | +16,248 B |
 | `esp32dev_wifi` RAM (static) | 83,020 B (25.3 %) | 85,204 B (26.0 %) | +2,184 B |
+
+Phase 4a (`feature/custom-sounds`, measured 2026-10-29):
+
+| | Phase 3 | Phase 4a | Change |
+|--|--|--|--|
+| `esp32dev` flash (1,441,792 B) | 1,338,081 B (92.8 %) | 1,340,609 B (93.0 %) | +2.5 KB, ~101 KB left |
+| `esp32dev` RAM (static) | 61,336 B | 61,488 B | +152 B |
+| `esp32dev_wifi` flash (2,883,584 B) | 2,054,453 B (71.2 %) | 2,056,953 B (71.3 %) | +2.5 KB |
+| `esp32dev_wifi` RAM (static) | 87,092 B | 87,228 B | +136 B |
+| `esp32dev_ble` flash (2,883,584 B) | 1,713,653 B (59.4 %) | 1,716,265 B (59.5 %) | +2.6 KB |
+| `esp32dev_ble` RAM (static) | 75,936 B | 76,080 B | +144 B |
 
 Phase 3 (`feature/widgets-extras`, measured 2026-10-29):
 

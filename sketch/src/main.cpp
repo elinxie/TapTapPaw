@@ -31,6 +31,7 @@ void ble_keys_begin(); // ble_keys.cpp
 //-------------------------------------------------------
 #include "audio/I2SAudio.h"
 #include "audio/WAVFileReader.h"
+#include "sounds.h"
 #include <driver/dac.h>
 #include <driver/gpio.h>
 #include <freertos/FreeRTOS.h>
@@ -45,6 +46,7 @@ typedef struct {
 static QueueHandle_t audio_queue = nullptr;
 static TaskHandle_t audio_task_handle = nullptr;
 static volatile bool audio_playing = false;
+static volatile bool audio_abort = false; // stop the sound that is playing (its file is about to be replaced or deleted)
 //-------------------------------------------------------
 
 #define TFT_WIDTH 320
@@ -134,6 +136,7 @@ static void audioTask(void *param) {
         break;
       }
 
+      if (audio_abort) break;
       AudioRequest tmp;
       if (xQueueReceive(audio_queue, &tmp, 0) == pdTRUE) {
         pending = tmp;
@@ -173,6 +176,16 @@ void playAudio(const char *filename) {
   snprintf(req.path, sizeof(req.path), "/littlefs/%s", filename);
   req.path[sizeof(req.path) - 1] = '\0';
   xQueueOverwrite(audio_queue, &req);
+}
+// Stop the sound that is playing and forget the queued one, so a file in LittleFS can be replaced or deleted (an open file must not be).
+void audioStopAndWait(uint16_t ms) {
+  if (!audio_queue) return;
+  audio_abort = true;
+  uint32_t t0 = millis();
+  while (audio_playing && millis() - t0 < ms) vTaskDelay(pdMS_TO_TICKS(5));
+  vTaskDelay(pdMS_TO_TICKS(15)); // the task re-queues a pending request just after it stops
+  xQueueReset(audio_queue);
+  audio_abort = false;
 }
 //-----------------------------------------
 
@@ -446,7 +459,7 @@ static void apply_weather(uint8_t weather_group, int8_t temp_c, uint8_t humidity
     // Update wallpaper only when the weather group changes
     apply_wallpaper(weather_group);
     lv_img_set_src(ui_main_Image_weatherIcon, &weather_icon[weather_group]);
-    playAudio(climate_sounds[weather_group]);
+    sound_play(lc::SND_CLIMATE_SUNNY + weather_group); // custom copy if there is one, else climate_<weather>.wav
   }
 
   strlcpy(last_time_str, time_str, sizeof(last_time_str));
@@ -555,7 +568,7 @@ void serial_parse(byte b) {
       packetLength = packet[2] + 3;
     } else if (packet[1] == 0x09 || packet[1] == 0x0A) { // WiFi credentials / location
       packetLength = packet[2] + 3;
-    } else if (layout_packet_id(packet[1])) { // layout upload (0x0B..0x0F, 0x11), see docs/WIDGETS.md
+    } else if (layout_packet_id(packet[1])) { // layout upload (0x0B..0x0F, 0x11, 0x14), see docs/WIDGETS.md
       packetLength = packet[2] + 3;
     } else if (packet[1] == 0x12) { // date
       packetLength = packet[2] + 3;
@@ -721,7 +734,7 @@ void serial_parse(byte b) {
         wifi_sync_set_location(la / 100000.0f, lo / 100000.0f);
       }
 
-      // Layout upload: [0xFF][0x0B..0x0F | 0x11][len][payload]. Answered with an ack packet 0x10 (layout_core.h).
+      // Layout upload: [0xFF][0x0B..0x0F | 0x11 | 0x14][len][payload]. Answered with an ack packet 0x10 (layout_core.h).
     } else if (layout_packet_id(packet[1])) {
       layout_packet(packet, packetLength);
 
@@ -931,7 +944,7 @@ void loop() {
       lv_label_set_text(ui_main_Label_title, "Youtube/Spotify/Music");
       lv_label_set_text(ui_main_Label_artist, "* Swipe down for setting *");
       // beep();
-      playAudio("disconnect.wav");
+      sound_play(lc::SND_DISCONNECT);
     } else { // serial connected
       power_wake(true); // display on at the right brightness (wakes the panel if it was asleep)
 
@@ -939,7 +952,7 @@ void loop() {
       status_led_update();
       show_source();
       // beepbeep();
-      playAudio("connect.wav");
+      sound_play(lc::SND_CONNECT);
     }
     last_connected_state = app_connected;
   }

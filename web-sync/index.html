@@ -76,6 +76,14 @@
   .meter { font:12px ui-monospace,monospace; color:var(--mute); }
   .meter b { color:var(--fg); font-weight:600; }
   .note { font-size:12px; color:var(--mute); margin-top:8px; }
+  /* ---- sounds ---- */
+  #sndTable { width:100%; border-collapse:collapse; font-size:13px; }
+  #sndTable th { text-align:left; color:var(--mute); font-weight:500; padding:4px 6px; }
+  #sndTable td { padding:5px 6px; border-top:1px solid #322b3a; vertical-align:middle; }
+  #sndTable td.sn { min-width:120px; } #sndTable td.ss { color:var(--mute); }
+  #sndTable button { padding:3px 8px; font-size:12px; margin:1px 2px 1px 0; }
+  #sndEditor { margin-top:10px; } #sndEditor input[type=range] { width:260px; }
+  #sndWave { width:100%; height:80px; background:#0e0c12; border-radius:6px; display:block; margin:6px 0; }
 </style>
 </head>
 <body>
@@ -135,6 +143,28 @@
     </div>
   </section>
 
+
+  <section id="sounds">
+    <h2>Sounds (your own sounds for the board)</h2>
+    <div class="mute" style="margin:-4px 0 10px">Pick any audio file (mp3, wav, m4a, ogg...). This page cuts it to at most 5 seconds, converts it to mono 16-bit audio the board can play, lets you listen, and sends it to a sound slot. Your copy is stored <b>next to</b> the original sound, never over it: <b>Reset sound</b> deletes only your copy and the original (or the built-in beep) comes back. The storage is shared with pictures. Needs firmware feature level 3.</div>
+    <div class="row meter" id="sndMeter"></div>
+    <table id="sndTable"></table>
+    <div class="props" id="sndEditor" hidden>
+      <h3 id="sndEdTitle"></h3>
+      <canvas id="sndWave" width="720" height="80"></canvas>
+      <div class="row"><label>Start</label><input type="range" id="sndStart" min="0" max="1" step="0.01" value="0"> <span id="sndStartV" class="mute"></span></div>
+      <div class="row"><label>Length</label><input type="range" id="sndLen" min="0.1" max="5" step="0.05" value="5"> <span id="sndLenV" class="mute"></span></div>
+      <div class="row">
+        <label style="min-width:0"><input type="checkbox" id="sndTrim" checked> trim silence</label>
+        <label style="min-width:0"><input type="checkbox" id="sndNorm" checked> make it loud</label>
+        <label style="min-width:0">Quality <select id="sndRate"><option value="16000">16 kHz (best)</option><option value="11025">11 kHz</option><option value="8000">8 kHz (smallest)</option></select></label>
+      </div>
+      <div class="mute" id="sndInfo"></div>
+      <div class="row"><button class="ghost" id="sndPlay">Preview</button><button class="ghost" id="sndStop">Stop</button><button id="sndUseSend">Use and send to board</button><button class="ghost" id="sndUse">Use (send later)</button><button class="ghost" id="sndCancel">Cancel</button></div>
+    </div>
+    <div class="row sendrow"><button class="ghost" id="sndCheck" title="Ask the board which sounds it has">Check board</button><button id="sndSendAll" class="ghost">Send all not yet sent</button><progress id="sndProg" max="1" value="0" hidden></progress> <span id="sndState" class="mute"></span></div>
+    <div class="note">The board plays WAV only: the page does the conversion in your browser, nothing is uploaded anywhere else. Sounds longer than the free space allows are refused before sending. A custom sound for the weather slots replaces the original every time the weather changes; for Pet tap, Pomodoro end, Reminder and the button sounds it replaces the built-in beep. Button sounds: pick a widget of type Button in the builder and set <i>Press sound</i>.</div>
+  </section>
 
   <section>
     <h2>Time and battery</h2>
@@ -419,6 +449,7 @@ function checkWidget(w, st) {
     else if (key === 'g') { e = intIn(v, 0, 65535); if (e) return e; }
     else if (key === 'i') { e = intIn(v, 0, 7); if (e) return e; slot = v; }
     else if (key === 'n') { e = intIn(v, 0, 31); if (e) return e; }
+    else if (key === 'u') { e = intIn(v, 0, 4); if (e) return e; } // button press sound: 0 click, 1..4 custom sound slot
     else if (key === 's') {
       if (typeof v !== 'string') return 'syntax error';
       if (/[\u0000-\u001F]/.test(v) || BAD_SURROGATE.test(v)) return 'syntax error';
@@ -460,8 +491,9 @@ function layoutChunkCount(n) { return Math.ceil(n / LAYOUT.CHUNK); }
 function layoutChunkPacket(seq, bytes) { const d = bytes.subarray(seq * LAYOUT.CHUNK, (seq + 1) * LAYOUT.CHUNK); return pkt(0x0C, [seq & 0xFF, seq >> 8, ...d]); }
 const layoutEndPacket = () => pkt(0x0D, []);
 const layoutAbortPacket = () => pkt(0x0E, []);
-const layoutQueryPacket = (slot) => pkt(0x0F, slot === undefined ? [] : [slot]); // with a slot: that picture's crc
-const layoutResetPacket = (slot) => pkt(0x11, slot === undefined ? [] : [slot]); // with a slot: delete that picture only
+const layoutQueryPacket = (slot, kind) => pkt(0x0F, slot === undefined ? [] : kind === undefined ? [slot] : [kind, slot]); // slot: that picture's crc; (slot, 3): that custom sound's crc, detail = KB
+const layoutResetPacket = (slot, kind) => pkt(0x11, slot === undefined ? [] : kind === undefined ? [slot] : [kind, slot]); // slot: delete that picture only; (slot, 3): delete that custom sound only
+const playPacket = (slot) => pkt(0x14, [slot]); // play a sound slot on the board: your custom copy, else the original, else its beep
 
 // ---- pictures (upload kind 1 = SJPG in a board slot, kind 2 = album art JPEG in RAM). See docs/WIDGETS.md ----
 const PIC = { SLOTS: 8, W: 240, H: 320, MAX_BYTES: 65536, ART: 96, ART_MAX: 12288, STRIP: 16 };
@@ -518,7 +550,7 @@ function parseLayoutAck(u) {
 }
 
 // Upload driver: stop-and-wait with retry and resume. io = { send(u8), ack(cmd, ms) -> Promise<ack|null>, onProgress?(done,total) }
-// opts.kind / opts.slot: 0 layout (default), 1 picture into slot 0..7, 2 album art. One chunk in flight: measured on the board,
+// opts.kind / opts.slot: 0 layout (default), 1 picture into slot 0..7, 2 album art, 3 custom sound into slot 0..14. One chunk in flight: measured on the board,
 // more than one loses bytes while it writes flash (the end checksum catches it, but the upload fails).
 async function uploadLayoutBytes(bytes, io, opts = {}) {
   const tries = opts.tries || 3, ms = opts.timeoutMs || 1500, kind = opts.kind || 0, slot = opts.slot || 0;
@@ -540,10 +572,11 @@ async function uploadLayoutBytes(bytes, io, opts = {}) {
   if (seq < total) return fail('chunk', null);
   a = await call(layoutEndPacket(), 0x0D, kind ? 6000 : ms); // pictures: the board test-decodes before it answers
   if (!a || a.status !== 0) {
+    if (a && kind === 3 && a.status === 8) return { ok: false, stage: 'end', ack: a, message: 'the board refused this sound: it is not a mono 16-bit WAV it can play' };
     if (a && kind && a.status === 8) return { ok: false, stage: 'end', ack: a, message: 'the board cannot decode this picture' };
     return fail('end', a);
   }
-  if (kind) return a.crc === crc32(bytes) ? { ok: true, ack: a, message: 'picture stored and verified' } : { ok: false, stage: 'verify', ack: a, message: 'verify: checksum read back from the board does not match' };
+  if (kind) return a.crc === crc32(bytes) ? { ok: true, ack: a, message: (kind === 3 ? 'sound' : 'picture') + ' stored and verified' } : { ok: false, stage: 'verify', ack: a, message: 'verify: checksum read back from the board does not match' };
   const q = await call(layoutQueryPacket(), 0x0F); // verify: the board reports the crc of the layout it stored
   if (!q || q.crc !== crc32(bytes)) return { ok: false, stage: 'verify', ack: q, message: 'verify: checksum read back from the board does not match' };
   return { ok: true, ack: q, message: 'layout stored and verified' };
@@ -568,7 +601,7 @@ const WIDGET_DEFS = {
   sw: { name: 'Stopwatch', w: 140, h: 36, o: ['z', 'c'] },
   dt: { name: 'Date', w: 160, h: 22, o: ['k', 'z', 'a', 'c'] },
   fs: { name: 'Focus sign', w: 200, h: 56, o: ['s'] },
-  bt: { name: 'Button', w: 104, h: 40, o: ['s', 'e', 'z', 'c', 'r'], def: { e: 1, s: 'Tap' } },
+  bt: { name: 'Button', w: 104, h: 40, o: ['s', 'e', 'u', 'z', 'c', 'r'], def: { e: 1, s: 'Tap' } },
   sp: { name: 'Spotify controls', w: 180, h: 44, o: ['c'] },
   rm: { name: 'Reminder', w: 180, h: 32, o: ['k', 'p', 'z'], def: { p: 30 } },
   pc: { name: 'Picture', w: 96, h: 96, o: ['pic'] }, // your image, encoded at the widget's size when sent
@@ -640,7 +673,7 @@ function layoutFromState(st) {
     if (p.bg && p.bg.t !== 'w') o.bg = deepCopy(p.bg);
     o.w = p.w.map((w) => {
       const r = { t: w.t, x: w.x, y: w.y, w: w.w, h: w.h };
-      for (const k of ['k', 'z', 'a', 'r']) if (w[k]) r[k] = w[k];
+      for (const k of ['k', 'z', 'a', 'r', 'u']) if (w[k]) r[k] = w[k];
       for (const k of ['p', 'b', 'e', 'g', 'i', 'n']) if (w[k] !== undefined && w[k] !== null) r[k] = w[k];
       if (w.o !== undefined && w.o !== 255) r.o = w.o;
       if (w.f) r.f = 1;
@@ -847,6 +880,103 @@ const PREVIEW_ART = {
   pawU: 'data:image/png;base64,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',
 };
 // PREVIEW-ASSETS END
+
+// ---- custom sounds (upload kind 3: a WAV in a sound slot, kept beside the originals). Pure functions, unit-tested in test-sounds.mjs ----
+// What the board plays: 16-bit mono PCM in a canonical 44-byte-header WAV, 8..24 kHz, at most 5 s. The page converts anything the browser can decode.
+const SND = { SLOTS: 15, ORIGINALS: 8, HEADER: 44, MAX_SECONDS: 5, RATE: 16000, RATES: [16000, 11025, 8000], RATE_MIN: 8000, RATE_MAX: 24000, SPARE_KB: 8, MIN_SAMPLES: 160 };
+SND.MAX_BYTES = SND.HEADER + SND.MAX_SECONDS * SND.RATE * 2;
+// same order as SoundSlot in sketch/src/layout_core.h. original: the board's own file for the slot; slots 8..14 have none (built-in beep or click)
+const SOUND_SLOTS = [
+  { name: 'Connected', hint: 'the desktop app or this page connects', original: 'connect.wav' },
+  { name: 'Disconnected', hint: 'the connection is lost', original: 'disconnect.wav' },
+  { name: 'Weather: sunny', hint: 'the weather changes to sunny', original: 'climate_sunny.wav' },
+  { name: 'Weather: cloudy', hint: 'the weather changes to cloudy', original: 'climate_cloudy.wav' },
+  { name: 'Weather: rainy', hint: 'the weather changes to rainy', original: 'climate_rainy.wav' },
+  { name: 'Weather: stormy', hint: 'the weather changes to stormy', original: 'climate_stormy.wav' },
+  { name: 'Weather: snowy', hint: 'the weather changes to snowy', original: 'climate_snowy.wav' },
+  { name: 'Weather: night', hint: 'the weather changes to night', original: 'climate_night.wav' },
+  { name: 'Pet tap', hint: 'you tap the cat or a pet widget (default: a soft purr, or a click on a pet widget)', fallback: 'built-in purr / click' },
+  { name: 'Pomodoro end', hint: 'a pomodoro work or break period ends (default: two beeps)', fallback: 'built-in double beep' },
+  { name: 'Reminder', hint: 'a reminder widget goes off (default: two beeps)', fallback: 'built-in double beep' },
+  { name: 'Button sound 1', hint: 'a button widget with "Press sound" set to 1 is tapped', fallback: 'built-in click' },
+  { name: 'Button sound 2', hint: 'a button widget with "Press sound" set to 2 is tapped', fallback: 'built-in click' },
+  { name: 'Button sound 3', hint: 'a button widget with "Press sound" set to 3 is tapped', fallback: 'built-in click' },
+  { name: 'Button sound 4', hint: 'a button widget with "Press sound" set to 4 is tapped', fallback: 'built-in click' },
+];
+function wavEncode(pcm, rate) { // Int16Array -> canonical WAV (what the board's WAVFileReader reads)
+  const n = pcm.length, out = new Uint8Array(SND.HEADER + n * 2), dv = new DataView(out.buffer);
+  const tag = (o, s) => { for (let i = 0; i < 4; i++) out[o + i] = s.charCodeAt(i); };
+  tag(0, 'RIFF'); dv.setUint32(4, 36 + n * 2, true); tag(8, 'WAVE'); tag(12, 'fmt ');
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true); dv.setUint32(24, rate, true);
+  dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true); tag(36, 'data'); dv.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) dv.setInt16(SND.HEADER + 2 * i, pcm[i], true);
+  return out;
+}
+// Mirrors wav_check() in layout_core.cpp: the same file must be accepted or refused by both.
+function wavCheck(u) {
+  const bad = (why) => ({ ok: false, why });
+  if (!u || u.length < SND.HEADER + 2) return bad('too short');
+  if (u.length > SND.MAX_BYTES) return bad('longer than 5 seconds');
+  const dv = new DataView(u.buffer, u.byteOffset, u.byteLength), tag = (o) => String.fromCharCode(u[o], u[o + 1], u[o + 2], u[o + 3]);
+  if (tag(0) !== 'RIFF' || tag(8) !== 'WAVE' || tag(12) !== 'fmt ' || tag(36) !== 'data') return bad('not a canonical WAV');
+  if (dv.getUint32(4, true) !== u.length - 8) return bad('RIFF size does not match the file');
+  if (dv.getUint32(16, true) !== 16 || dv.getUint16(20, true) !== 1 || dv.getUint16(22, true) !== 1) return bad('not mono PCM');
+  const rate = dv.getUint32(24, true);
+  if (rate < SND.RATE_MIN || rate > SND.RATE_MAX) return bad('sample rate must be 8000..24000 Hz');
+  if (dv.getUint32(28, true) !== rate * 2 || dv.getUint16(32, true) !== 2 || dv.getUint16(34, true) !== 16) return bad('not 16-bit');
+  const data = dv.getUint32(40, true);
+  if (data !== u.length - SND.HEADER || (data & 1)) return bad('data size does not match the file');
+  return { ok: true, rate, samples: data / 2, seconds: data / 2 / rate };
+}
+function mixToMono(chs) { // average the channels
+  if (chs.length === 1) return Float32Array.from(chs[0]);
+  const n = chs[0].length, out = new Float32Array(n);
+  for (const c of chs) for (let i = 0; i < n; i++) out[i] += c[i];
+  for (let i = 0; i < n; i++) out[i] /= chs.length;
+  return out;
+}
+// Sample rate conversion for when the browser did not do it: averages over each output sample's span going down (a simple low-pass),
+// interpolates going up. The page normally decodes straight to the target rate with the browser's own resampler instead.
+function resample(x, from, to) {
+  if (from === to || x.length === 0) return x;
+  const n = Math.floor(x.length * to / from), out = new Float32Array(n), r = from / to;
+  if (r > 1) {
+    const cs = new Float64Array(x.length + 1);
+    for (let i = 0; i < x.length; i++) cs[i + 1] = cs[i] + x[i];
+    const F = (t) => { const k = Math.min(x.length - 1, Math.floor(t)); return cs[k] + x[k] * (t - k); };
+    for (let i = 0; i < n; i++) { const a = i * r, b = Math.min(x.length, (i + 1) * r); out[i] = (F(b) - F(a)) / (b - a); }
+  } else {
+    for (let i = 0; i < n; i++) { const t = i * r, k = Math.floor(t), f = t - k; out[i] = x[k] * (1 - f) + (x[Math.min(x.length - 1, k + 1)]) * f; }
+  }
+  return out;
+}
+// Cut, clean and convert: o = { start, length (seconds), trim, normalize, fadeMs }. Returns { pcm: Int16Array, seconds, peak, gain }.
+function prepareSound(mono, rate, o = {}) {
+  const maxN = Math.round((o.maxSeconds || SND.MAX_SECONDS) * rate);
+  const s = Math.max(0, Math.min(mono.length, Math.round((o.start || 0) * rate)));
+  const len = o.length === undefined ? maxN : Math.min(maxN, Math.max(0, Math.round(o.length * rate)));
+  let x = mono.slice(s, Math.min(mono.length, s + len));
+  if (o.trim !== false) { // drop near-silence at both ends, keep 20 ms around the sound
+    const thr = 0.01; let a = 0, b = x.length;
+    while (a < b && Math.abs(x[a]) < thr) a++;
+    while (b > a && Math.abs(x[b - 1]) < thr) b--;
+    const pad = Math.round(0.02 * rate);
+    x = a === b ? x.slice(0, 0) : x.slice(Math.max(0, a - pad), Math.min(x.length, b + pad));
+  }
+  let peak = 0;
+  for (let i = 0; i < x.length; i++) peak = Math.max(peak, Math.abs(x[i]));
+  const gain = o.normalize !== false && peak > 0.001 ? Math.min(8, 0.9 / peak) : 1; // loud to 90 %, never more than 8x so noise stays noise
+  const f = Math.min(Math.round((o.fadeMs === undefined ? 6 : o.fadeMs) / 1000 * rate), x.length >> 1); // short fades: no click at either end
+  const pcm = new Int16Array(x.length);
+  for (let i = 0; i < x.length; i++) {
+    let v = x[i] * gain;
+    if (i < f) v *= i / f; else if (i >= x.length - f) v *= (x.length - 1 - i) / f;
+    pcm[i] = Math.max(-32768, Math.min(32767, Math.round(v * 32767)));
+  }
+  return { pcm, seconds: pcm.length / rate, peak, gain };
+}
+const soundBytesFit = (bytes, freeKb) => bytes / 1024 <= freeKb - SND.SPARE_KB; // the board keeps 8 KB spare; a replaced copy stays until the new one is whole
+function soundFitSeconds(freeKb, rate) { return Math.max(0, Math.min(SND.MAX_SECONDS, ((freeKb - SND.SPARE_KB) * 1024 - SND.HEADER) / (2 * rate))); }
 
 // ---- UI ---- (everything below needs a browser; the packet code above is unit-tested in test-packets.mjs)
 if (!window.__ttpReturn) { // the Spotify sign-in popup only runs the small script in <head>
@@ -1385,6 +1515,7 @@ function renderProps(force) {
       else if (a.arg) h += opt('Event number', '<input type="number" data-k="g" min="0" max="65535">') + '<div class="mute">The page log shows it when the button is tapped.</div>';
       else if (a.page) h += '<div class="mute">Runs on the web page: it must be connected (and signed in to Spotify, Premium).</div>';
     }
+    if (k === 'u') h += opt('Press sound', sel('u', ['Default click'].concat([1, 2, 3, 4].map((n) => 'Custom ' + n + (soundKnown(10 + n) ? '' : ' (no sound sent yet)'))))) + '<div class="mute">Custom sounds are chosen in the Sounds section below the builder. Needs firmware feature level 3.</div>';
     if (k === 'n') { h += opt('Pet', sel('n', PET_PREVIEW.map((q) => q.name[0].toUpperCase() + q.name.slice(1) + (q.all ? ' (WiFi / Bluetooth build)' : '')))); if (PET_PREVIEW[w.n | 0] && PET_PREVIEW[w.n | 0].all) h += '<div class="mute">The standard firmware carries 6 pets to save space; it shows the cat instead of this one.</div>'; }
     if (k === 'f') h += opt('', '<label style="min-width:0"><input type="checkbox" data-k="f"> 24-hour</label>');
     if (k === 'q') h += opt('', '<label style="min-width:0"><input type="checkbox" data-k="q"> show seconds</label>');
@@ -1655,7 +1786,7 @@ async function syncPictures(lay, io, progress) {
 }
 // Album art: when Spotify's track changes and the layout shows album art, send the cover (96x96 JPEG, board RAM only)
 async function sendAlbumArt(url) {
-  if (!url || url === lastArtUrl || artBusy || sending || !active || !picturesOrArtShown()) return;
+  if (!url || url === lastArtUrl || artBusy || sending || sndBusy || !active || !picturesOrArtShown()) return;
   artBusy = true; lastArtUrl = url;
   try {
     const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status); // i.scdn.co allows reading (CORS *)
@@ -1672,8 +1803,8 @@ async function sendAlbumArt(url) {
 // for checking things from the browser console (and the automated page tests): window.ttpDebug
 window.ttpDebug = { get pics() { return pics; }, encodePicture, syncPictures, sendAlbumArt, editor: () => ed, boardIo };
 function picturesOrArtShown() { return ed.toLayout().pg.some((p) => (p.w || []).some((w) => w.t === 'aa')); }
-function layoutLevel(lay) { let n = 0; for (const p of lay.pg) for (const w of (p.w || [])) n = Math.max(n, WIDGET_LEVEL[w.t] || 0); for (const p of lay.pg) if (p.bg && p.bg.t === 'i') n = Math.max(n, 2); return n; }
-function newWidgetNames(lay, have) { const s = new Set(); for (const p of lay.pg) for (const w of (p.w || [])) if ((WIDGET_LEVEL[w.t] || 0) > have) s.add(WIDGET_DEFS[w.t] ? WIDGET_DEFS[w.t].name : w.t); return [...s].join(', ') || 'picture background'; }
+function layoutLevel(lay) { let n = 0; for (const p of lay.pg) for (const w of (p.w || [])) n = Math.max(n, WIDGET_LEVEL[w.t] || 0, w.u ? 3 : 0); for (const p of lay.pg) if (p.bg && p.bg.t === 'i') n = Math.max(n, 2); return n; }
+function newWidgetNames(lay, have) { const s = new Set(); for (const p of lay.pg) for (const w of (p.w || [])) { if ((WIDGET_LEVEL[w.t] || 0) > have) s.add(WIDGET_DEFS[w.t] ? WIDGET_DEFS[w.t].name : w.t); if (w.u && have < 3) s.add('Button press sound'); } return [...s].join(', ') || 'picture background'; }
 // ---- talking to the board: acks (0x10) arrive through feed() ----
 const ackQueue = [], ackWaiters = [];
 function onAck(a) {
@@ -1690,15 +1821,16 @@ function waitAck(cmd, ms) {
   });
 }
 // Dry run: a small simulated board, so the whole upload can be watched (and tried) without hardware
-const sim = { open: false, total: 0, crc: 0, data: [], stored: null, storedCrc: 0, kind: 0, slot: 0, pics: {}, used: 0 };
+const sim = { open: false, total: 0, crc: 0, data: [], stored: null, storedCrc: 0, kind: 0, slot: 0, pics: {}, snds: {}, used: 0, played: -1 };
 function simHandle(u) {
   const id = u[1], p = Array.from(u.subarray(3));
   const mk = (status, detail = 0) => ({ cmd: id, status, statusName: LAYOUT_STATUS[status], detail, detailName: status === 8 ? LAYOUT_ERRORS[detail] : '',
     active: !!sim.stored, stored: !!sim.stored, safeMode: false, sessionOpen: sim.open, seq: Math.ceil(sim.data.length / LAYOUT.CHUNK),
-    freeKb: 200 - Math.ceil(Object.values(sim.pics).reduce((n, b) => n + b.length, 0) / 1024), crc: sim.storedCrc });
+    freeKb: 200 - Math.ceil(Object.values(sim.pics).concat(Object.values(sim.snds)).reduce((n, b) => n + b.length, 0) / 1024), crc: sim.storedCrc });
   if (id === 0x0B) {
     const t = p[3] | (p[4] << 8) | (p[5] << 16), c = (p[7] | (p[8] << 8) | (p[9] << 16) | (p[10] << 24)) >>> 0;
-    if (p[0] > 2 || (p[0] === 1 && p[1] >= PIC.SLOTS)) return mk(1);
+    if (p[0] > 3 || (p[0] === 1 && p[1] >= PIC.SLOTS) || (p[0] === 3 && (p[1] >= SND.SLOTS || t < SND.HEADER + 2))) return mk(1);
+    if (p[0] === 3 && t > SND.MAX_BYTES) return mk(3);
     if (!(sim.open && sim.total === t && sim.crc === c && sim.kind === p[0] && sim.slot === p[1])) Object.assign(sim, { open: true, total: t, crc: c, data: [], kind: p[0], slot: p[1] });
     return mk(0);
   }
@@ -1717,18 +1849,22 @@ function simHandle(u) {
     if (crc32(bytes) !== sim.crc) return mk(4);
     if (sim.kind === 1) { if (!sjpgInfo(bytes)) return mk(8, 1); sim.pics[sim.slot] = bytes; return Object.assign(mk(0), { crc: sim.crc }); }
     if (sim.kind === 2) { if (bytes[0] !== 0xFF || bytes[1] !== 0xD8) return mk(8, 1); return Object.assign(mk(0), { crc: sim.crc }); }
+    if (sim.kind === 3) { if (!wavCheck(bytes).ok) return mk(8, 0); sim.snds[sim.slot] = bytes; return Object.assign(mk(0), { crc: sim.crc }); }
     const v = validateLayout(new TextDecoder().decode(bytes));
     if (!v.ok) return mk(8, v.code);
     sim.stored = bytes; sim.storedCrc = sim.crc; return mk(0);
   }
   if (id === 0x0E) { sim.open = false; sim.data = []; return mk(0); }
+  if (id === 0x11 && p.length === 2 && p[0] === 3) { if (p[1] >= SND.SLOTS) return mk(1); delete sim.snds[p[1]]; return Object.assign(mk(0), { crc: 0 }); }
   if (id === 0x11 && p.length === 1) { delete sim.pics[p[0]]; return Object.assign(mk(0), { crc: 0 }); }
   if (id === 0x11) { sim.stored = null; sim.storedCrc = 0; return mk(0); }
+  if (id === 0x0F && p.length === 2 && p[0] === 3) return p[1] >= SND.SLOTS ? mk(1) : Object.assign(mk(0, sim.snds[p[1]] ? Math.ceil(sim.snds[p[1]].length / 1024) : 0), { crc: sim.snds[p[1]] ? crc32(sim.snds[p[1]]) : 0 });
   if (id === 0x0F && p.length === 1) return Object.assign(mk(0, 2), { crc: sim.pics[p[0]] ? crc32(sim.pics[p[0]]) : 0 });
-  if (id === 0x0F) return mk(0, 2); // feature level 2
+  if (id === 0x0F) return mk(0, 3); // feature level 3
+  if (id === 0x14) { if (p.length !== 1 || p[0] >= SND.SLOTS) return mk(1); sim.played = p[0]; return mk(0); }
   return mk(0);
 }
-const PKT_NAMES = { 0x0B: 'begin', 0x0C: 'chunk', 0x0D: 'end', 0x0E: 'abort', 0x0F: 'query', 0x11: 'reset' };
+const PKT_NAMES = { 0x0B: 'begin', 0x0C: 'chunk', 0x0D: 'end', 0x0E: 'abort', 0x0F: 'query', 0x11: 'reset', 0x14: 'play' };
 function boardIo() {
   return {
     send(u) {
@@ -1749,6 +1885,7 @@ function ackText(a) {
 function boardReady() { if (!active) { flash('Connect to the board first, or press Dry run to try it without one.'); return false; } return true; }
 $('bSend').onclick = async () => {
   if (sending || !boardReady()) return;
+  if (sndBusy || artBusy) { flash('wait: a sound or album art is being sent'); return; }
   const o = ed.toJSON(); if (!o.ok) { flash('not valid: ' + o.err); return; }
   const need = layoutLevel(ed.toLayout());
   if (need > 0) { // ask the firmware what it can draw before sending widgets it does not know
@@ -1791,6 +1928,203 @@ $('bReset').onclick = async () => {
   io.send(layoutResetPacket()); const a = await io.ack(0x11, 2000);
   if (a && a.status === 0) setSend('Board reset to the original screens.', 'ok'); else setSend('Reset failed: ' + (a ? a.statusName : ackText(null)), 'bad');
 };
+
+// ---- sounds: choose a file, convert, preview, send to a sound slot (upload kind 3) ----
+const snd = SOUND_SLOTS.map(() => ({ bytes: null, name: '', seconds: 0, rate: 0, pending: false })); // chosen on this page
+const boardSnd = SOUND_SLOTS.map(() => null); // asked from the board: { crc, kb }
+let sndMeta = {}; try { sndMeta = JSON.parse(load('snd_meta') || '{}') || {}; } catch (e) { sndMeta = {}; } // names of the sounds this browser sent: { slot: { crc, name, seconds, rate } }
+let sndBusy = false, sndEdit = null, sndCtx = null, sndSrc = null, sndLevel = null;
+function soundKnown(slot) { return !!(snd[slot].bytes || (boardSnd[slot] && boardSnd[slot].crc)); }
+function setSnd(text, cls) { $('sndState').textContent = text; $('sndState').className = cls || 'mute'; }
+function sndPlayPcm(pcm, rate) { // preview what the board will play: the converted samples, not the original file
+  sndStopPreview();
+  try {
+    sndCtx = sndCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (sndCtx.state === 'suspended') sndCtx.resume();
+    const buf = sndCtx.createBuffer(1, pcm.length, rate), ch = buf.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    sndSrc = sndCtx.createBufferSource(); sndSrc.buffer = buf; sndSrc.connect(sndCtx.destination); sndSrc.start();
+  } catch (e) { setSnd('cannot play audio in this browser: ' + e.message, 'bad'); }
+}
+function sndStopPreview() { try { if (sndSrc) sndSrc.stop(); } catch (e) { /* already stopped */ } sndSrc = null; }
+function pcmOfWav(bytes) { const c = wavCheck(bytes); return c.ok ? { pcm: new Int16Array(bytes.buffer.slice(bytes.byteOffset + SND.HEADER, bytes.byteOffset + bytes.length)), rate: c.rate } : null; }
+function renderSounds() {
+  const conn = active && !sndBusy;
+  const kbSum = boardSnd.reduce((n, b) => n + (b && b.crc ? b.kb : 0), 0);
+  $('sndMeter').innerHTML = ['custom sounds on the board <b>' + boardSnd.filter((b) => b && b.crc).length + '</b> / ' + SND.SLOTS + (boardSnd.some(Boolean) ? ' (' + kbSum + ' KB)' : ''),
+    boardFreeKb !== null ? 'free storage <b>' + boardFreeKb + ' KB</b> (shared with pictures) = about <b>' + soundFitSeconds(boardFreeKb, SND.RATE).toFixed(1) + ' s</b> at 16 kHz' : 'press Check board to see the free storage'].join(' &middot; ');
+  let h = '<tr><th>Sound</th><th>Now</th><th></th></tr>';
+  SOUND_SLOTS.forEach((d, i) => {
+    const s = snd[i], b = boardSnd[i], meta = sndMeta[i];
+    let now;
+    if (s.bytes && s.pending) now = '<b>' + esc(s.name) + '</b>, ' + s.seconds.toFixed(1) + ' s, ' + Math.ceil(s.bytes.length / 1024) + ' KB: <span class="bad">not sent yet</span>';
+    else if (b && b.crc) now = 'custom' + (meta && meta.crc === b.crc ? ' <b>' + esc(meta.name) + '</b>' : ' sound (sent from somewhere else)') + ', ' + b.kb + ' KB on the board';
+    else if (b) now = d.original ? 'original ' + d.original : d.fallback;
+    else now = d.original ? 'original ' + d.original + ' (board not checked)' : d.fallback + ' (board not checked)';
+    const has = (b && b.crc) || s.bytes;
+    h += '<tr data-i="' + i + '"><td class="sn" title="Plays when ' + esc(d.hint) + '">' + esc(d.name) + '</td><td class="ss">' + now + '</td><td>' +
+      '<button class="ghost" data-a="pick"' + (sndBusy ? ' disabled' : '') + '>Choose file</button>' +
+      '<button class="ghost" data-a="prev"' + (s.bytes ? '' : ' disabled') + '>Preview</button>' +
+      '<button data-a="send"' + (conn && s.bytes && s.pending ? '' : ' disabled') + '>Send</button>' +
+      '<button class="ghost" data-a="play"' + (conn ? '' : ' disabled') + ' title="Play this slot on the board, the way the board would">Play on board</button>' +
+      '<button class="ghost" data-a="reset"' + (has && !sndBusy ? '' : ' disabled') + ' title="Delete only your copy">Reset sound</button></td></tr>';
+  });
+  $('sndTable').innerHTML = h;
+  $('sndSendAll').disabled = !(active && !sndBusy && snd.some((s) => s.bytes && s.pending));
+  $('sndCheck').disabled = !active || sndBusy;
+}
+$('sndTable').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b || b.disabled) return;
+  const i = +b.closest('tr').dataset.i, a = b.dataset.a;
+  if (a === 'pick') sndPick(i);
+  else if (a === 'prev') { const p = pcmOfWav(snd[i].bytes); if (p) sndPlayPcm(p.pcm, p.rate); }
+  else if (a === 'send') sendSound(i);
+  else if (a === 'play') playOnBoard(i);
+  else if (a === 'reset') resetSound(i);
+};
+function sndPick(slot) {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'audio/*,.wav,.mp3,.m4a,.aac,.ogg,.opus,.flac,.webm';
+  inp.onchange = async () => {
+    const f = inp.files[0]; if (!f) return;
+    if (f.size > 30 * 1024 * 1024) { setSnd('that file is over 30 MB: cut it shorter first', 'bad'); return; }
+    setSnd('reading ' + f.name + '...');
+    try { await sndOpenEditor(slot, f.name, await f.arrayBuffer()); setSnd(''); } catch (err) { setSnd('could not read the sound: ' + err.message, 'bad'); }
+  };
+  inp.click();
+}
+// decode at the target rate: the browser's own resampler does the rate conversion; fall back to ours when it cannot
+async function sndDecode(raw, rate) {
+  let ctx = null;
+  try { ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: rate }); } catch (e) { ctx = new (window.AudioContext || window.webkitAudioContext)(); }
+  try {
+    const ab = await ctx.decodeAudioData(raw.slice(0));
+    const chs = []; for (let c = 0; c < ab.numberOfChannels; c++) chs.push(ab.getChannelData(c));
+    return resample(mixToMono(chs), ab.sampleRate, rate);
+  } catch (e) { throw new Error('this browser cannot decode that file (try wav, mp3 or m4a)'); }
+  finally { try { ctx.close(); } catch (e) { /* ignore */ } }
+}
+async function sndOpenEditor(slot, name, raw) {
+  const rate = +$('sndRate').value, mono = await sndDecode(raw, rate);
+  if (mono.length < SND.MIN_SAMPLES) throw new Error('the file has no audio in it');
+  sndEdit = { slot, name, raw, mono, rate, dur: mono.length / rate, start: 0, len: Math.min(SND.MAX_SECONDS, mono.length / rate), out: null };
+  $('sndEditor').hidden = false; $('sndEdTitle').textContent = SOUND_SLOTS[slot].name + ': ' + name;
+  $('sndEditor').scrollIntoView({ block: 'nearest' });
+  sndEditUpdate(true);
+}
+function sndEditUpdate(reset) {
+  const E = sndEdit; if (!E) return;
+  const st = $('sndStart'), ln = $('sndLen');
+  if (reset) { st.max = Math.max(0, E.dur - 0.1).toFixed(2); st.value = E.start; ln.max = Math.min(SND.MAX_SECONDS, E.dur).toFixed(2); ln.value = E.len; }
+  E.start = Math.min(+st.value, Math.max(0, E.dur - 0.1));
+  E.len = Math.max(0.1, Math.min(+ln.value, SND.MAX_SECONDS, E.dur - E.start));
+  const r = prepareSound(E.mono, E.rate, { start: E.start, length: E.len, trim: $('sndTrim').checked, normalize: $('sndNorm').checked });
+  E.out = r;
+  const bytes = r.pcm.length >= SND.MIN_SAMPLES ? wavEncode(r.pcm, E.rate) : null; E.bytes = bytes;
+  $('sndStartV').textContent = E.start.toFixed(2) + ' s'; $('sndLenV').textContent = E.len.toFixed(2) + ' s of ' + E.dur.toFixed(1) + ' s';
+  const kb = bytes ? Math.ceil(bytes.length / 1024) : 0;
+  let info = bytes ? 'Result: <b>' + r.seconds.toFixed(2) + ' s</b>, ' + (E.rate / 1000) + ' kHz mono, <b>' + kb + ' KB</b>' + (r.gain > 1.05 ? ', louder x' + r.gain.toFixed(1) : '') : '<span class="bad">nothing left to play: move Start or untick trim silence</span>';
+  if (bytes && boardFreeKb !== null) info += soundBytesFit(bytes.length, boardFreeKb) ? ' (fits: board has ' + boardFreeKb + ' KB free)' : ' <span class="bad">(too big: the board has ' + boardFreeKb + ' KB free, 8 KB stay spare. Shorten it or lower the quality)</span>';
+  $('sndInfo').innerHTML = info;
+  for (const id of ['sndPlay', 'sndUse', 'sndUseSend']) $(id).disabled = !bytes;
+  $('sndUseSend').disabled = !bytes || !active;
+  sndDrawWave();
+}
+function sndDrawWave() {
+  const E = sndEdit, c = $('sndWave'), g = c.getContext('2d'), W = c.width, Hh = c.height;
+  g.clearRect(0, 0, W, Hh); if (!E) return;
+  const per = E.mono.length / W; g.fillStyle = '#8c7ca0';
+  for (let x = 0; x < W; x++) { let mn = 0, mx = 0; for (let i = Math.floor(x * per), e = Math.min(E.mono.length, Math.floor((x + 1) * per)); i < e; i += Math.max(1, Math.floor(per / 12))) { const v = E.mono[i]; if (v < mn) mn = v; if (v > mx) mx = v; } g.fillRect(x, Hh / 2 - mx * Hh / 2, 1, Math.max(1, (mx - mn) * Hh / 2)); }
+  g.fillStyle = 'rgba(249,201,121,.22)'; g.fillRect(E.start / E.dur * W, 0, E.len / E.dur * W, Hh);
+}
+for (const id of ['sndStart', 'sndLen', 'sndTrim', 'sndNorm']) $(id).oninput = () => sndEditUpdate(false);
+$('sndRate').onchange = async () => { // new rate: decode the same file again at that rate
+  const E = sndEdit; if (!E) return;
+  try { const rate = +$('sndRate').value; E.mono = await sndDecode(E.raw, rate); E.rate = rate; E.dur = E.mono.length / rate; sndEditUpdate(true); } catch (e) { setSnd(e.message, 'bad'); }
+};
+$('sndPlay').onclick = () => { if (sndEdit && sndEdit.out) sndPlayPcm(sndEdit.out.pcm, sndEdit.rate); };
+$('sndStop').onclick = sndStopPreview;
+$('sndCancel').onclick = () => { sndStopPreview(); sndEdit = null; $('sndEditor').hidden = true; };
+function sndUse() {
+  const E = sndEdit; if (!E || !E.bytes) return false;
+  sndStopPreview();
+  snd[E.slot] = { bytes: E.bytes, name: E.name.replace(/\.[^.]+$/, '').slice(0, 32), seconds: E.out.seconds, rate: E.rate, pending: true };
+  const slot = E.slot; sndEdit = null; $('sndEditor').hidden = true; renderSounds(); renderProps(true);
+  return slot;
+}
+$('sndUse').onclick = () => { sndUse(); };
+$('sndUseSend').onclick = () => { const slot = sndUse(); if (slot !== false) sendSound(slot); };
+async function sndAsk(packet, cmd, ms = 1500) { const io = boardIo(); ackQueue.length = 0; io.send(packet); return io.ack(cmd, ms); }
+async function sndCheckBoard(quiet) {
+  if (!boardReady() || sndBusy || sndBlocked()) return false;
+  sndBusy = true; renderSounds();
+  try {
+    const q = await sndAsk(layoutQueryPacket(), 0x0F);
+    if (!q) { setSnd(ackText(null), 'bad'); return false; }
+    boardFreeKb = q.freeKb; sndLevel = q.detail;
+    if (q.detail < 3) { setSnd('This firmware has no custom sounds yet (feature level ' + q.detail + '). Flash the newer firmware first.', 'bad'); return false; }
+    for (let i = 0; i < SND.SLOTS; i++) {
+      const a = await sndAsk(layoutQueryPacket(i, 3), 0x0F);
+      if (!a || a.status !== 0) { setSnd('slot ' + (i + 1) + ': ' + (a ? a.statusName : 'no answer from the board'), 'bad'); return false; }
+      boardSnd[i] = { crc: a.crc, kb: a.detail }; boardFreeKb = a.freeKb;
+      if (i % 3 === 2) renderSounds();
+    }
+    if (!quiet) setSnd('Board checked: ' + boardSnd.filter((b) => b.crc).length + ' custom sound(s), ' + boardFreeKb + ' KB free.', 'ok');
+    return true;
+  } finally { sndBusy = false; renderSounds(); renderMeter(); }
+}
+function sndBlocked() { // the board has one upload session: not while a layout, picture or album art is on its way
+  if (sending || artBusy) { setSnd('Wait a moment: the layout or album art is being sent.', 'bad'); return true; }
+  return false;
+}
+async function sendSound(slot) {
+  const s = snd[slot]; if (!s.bytes || sndBusy || !boardReady() || sndBlocked()) return false;
+  sndBusy = true; renderSounds(); $('sndProg').hidden = false; $('sndProg').value = 0;
+  let okSend = false;
+  try {
+    setSnd('checking the board...');
+    const q = await sndAsk(layoutQueryPacket(), 0x0F);
+    if (!q) { setSnd(ackText(null), 'bad'); return false; }
+    boardFreeKb = q.freeKb; sndLevel = q.detail;
+    if (q.detail < 3) { setSnd('This firmware has no custom sounds yet (feature level ' + q.detail + '). Flash the newer firmware first.', 'bad'); return false; }
+    if (!soundBytesFit(s.bytes.length, q.freeKb)) { setSnd('Not sent: "' + SOUND_SLOTS[slot].name + '" needs ' + Math.ceil(s.bytes.length / 1024) + ' KB but the board has ' + q.freeKb + ' KB free (8 KB stay spare, and pictures share the space). Shorten the sound, lower the quality or remove a picture.', 'bad'); return false; }
+    const io = Object.assign(boardIo(), { onProgress: (d, t) => { $('sndProg').value = d / t; setSnd('sending ' + SOUND_SLOTS[slot].name + ': ' + Math.round(100 * d / t) + '%'); } });
+    ackQueue.length = 0;
+    const r = await uploadLayoutBytes(s.bytes, io, { kind: 3, slot, timeoutMs: 1500, tries: 3 });
+    if (!r.ok) { setSnd('Not sent: ' + r.message + '. The board keeps what it had for this slot.', 'bad'); log('sound upload failed: ' + r.message); return false; }
+    const c = crc32(s.bytes);
+    sndMeta[slot] = { crc: c, name: s.name, seconds: s.seconds, rate: s.rate }; store('snd_meta', JSON.stringify(sndMeta));
+    s.pending = false; boardSnd[slot] = { crc: c, kb: Math.ceil(s.bytes.length / 1024) };
+    const a = await sndAsk(layoutQueryPacket(slot, 3), 0x0F); if (a) boardFreeKb = a.freeKb;
+    setSnd((dry ? 'Dry run: ' : '') + SOUND_SLOTS[slot].name + ' stored and verified (' + Math.ceil(s.bytes.length / 1024) + ' KB, ' + (boardFreeKb !== null ? boardFreeKb + ' KB free left' : '') + ').', 'ok');
+    log('sound ' + SOUND_SLOTS[slot].name + ' sent' + (dry ? ' (dry run)' : '') + ', ' + s.bytes.length + ' bytes, crc ' + c.toString(16).padStart(8, '0'));
+    okSend = true;
+  } catch (e) { setSnd('Not sent: ' + e.message, 'bad'); }
+  finally { sndBusy = false; renderSounds(); renderMeter(); renderProps(true); setTimeout(() => { $('sndProg').hidden = true; }, 1200); }
+  return okSend;
+}
+async function playOnBoard(slot) {
+  if (!boardReady() || sndBusy || sndBlocked()) return;
+  const a = await sndAsk(playPacket(slot), 0x14, 2000);
+  setSnd(a && a.status === 0 ? 'Playing "' + SOUND_SLOTS[slot].name + '" on the board.' : 'Could not play: ' + (a ? a.statusName : 'no answer from the board (firmware feature level 3 needed)'), a && a.status === 0 ? 'ok' : 'bad');
+}
+async function resetSound(slot) {
+  const s = snd[slot], b = boardSnd[slot], onBoard = !!(b && b.crc);
+  if (!onBoard) { snd[slot] = { bytes: null, name: '', seconds: 0, rate: 0, pending: false }; renderSounds(); renderProps(true); setSnd('Forgot the sound chosen for ' + SOUND_SLOTS[slot].name + '.'); return; }
+  if (!boardReady() || sndBlocked()) return;
+  if (!confirm('Remove your custom copy of "' + SOUND_SLOTS[slot].name + '" from the board?\n\nOnly your copy is deleted. ' + (SOUND_SLOTS[slot].original ? 'The original ' + SOUND_SLOTS[slot].original + ' stays and plays again.' : 'The board goes back to its ' + SOUND_SLOTS[slot].fallback + '.'))) return;
+  sndBusy = true; renderSounds();
+  try {
+    const a = await sndAsk(layoutResetPacket(slot, 3), 0x11, 2500);
+    if (!a || a.status !== 0) { setSnd('Reset failed: ' + (a ? a.statusName : ackText(null)), 'bad'); return; }
+    boardSnd[slot] = { crc: 0, kb: 0 }; snd[slot] = { bytes: null, name: '', seconds: 0, rate: 0, pending: false }; delete sndMeta[slot]; store('snd_meta', JSON.stringify(sndMeta));
+    boardFreeKb = a.freeKb; setSnd('Reset: your copy of ' + SOUND_SLOTS[slot].name + ' is gone, ' + (SOUND_SLOTS[slot].original ? 'the original plays again.' : 'the built-in sound is back.'), 'ok');
+    log('custom sound ' + SOUND_SLOTS[slot].name + ' removed from the board (only the custom copy)');
+  } finally { sndBusy = false; renderSounds(); renderMeter(); renderProps(true); }
+}
+$('sndCheck').onclick = () => sndCheckBoard();
+$('sndSendAll').onclick = async () => { for (let i = 0; i < SND.SLOTS; i++) if (snd[i].bytes && snd[i].pending) { if (!(await sendSound(i))) break; } };
+Object.assign(window.ttpDebug, { snd, boardSnd, sendSound, sndCheckBoard, sndOpenEditor, sndEditUpdate, resetSound, playOnBoard, get sndMeta() { return sndMeta; } });
+renderSounds();
 
 // ---- start: the last draft from this browser, else a template ----
 (function initBuilder() {

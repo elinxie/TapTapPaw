@@ -66,6 +66,7 @@ void audioResumeAfterTone();
 void beepbeep();
 void beep();
 void clickSound();
+extern volatile uint32_t click_mute_until; // clickSound() stays silent until millis() reaches this (a custom button sound is playing)
 void offSound();
 
 

@@ -4,6 +4,7 @@
 #include "animation.h"
 #include "keymap.h"
 #include "pets/pets.h"
+#include "sounds.h"
 #include "layout_core.h"
 #include "ui/ui.h"
 #include <LittleFS.h>
@@ -106,6 +107,9 @@ static bool file_exists() { return path_exists(FINAL_PATH); }
 
 // ---- pictures (upload kind 1, LittleFS /img/<slot>.sjpg) and album art (kind 2, RAM only) ----
 static const char *PIC_TMP = "/img/tmp.part";
+static const char *SND_TMP = "/snd/tmp.part"; // custom sounds (upload kind 3) live in /snd/<slot>.wav; the originals stay in the root
+static void snd_path(uint8_t slot, char *out, size_t n) { snprintf(out, n, "/snd/%u.wav", (unsigned)slot); }
+void audioStopAndWait(uint16_t ms); // main.cpp: a file that is playing must not be replaced or deleted
 static void pic_path(uint8_t slot, char *out, size_t n) { snprintf(out, n, "/img/%u.sjpg", (unsigned)slot); }
 static void pic_lv_path(uint8_t slot, char *out, size_t n) { snprintf(out, n, "S:/img/%u.sjpg", (unsigned)slot); } // LVGL drive S = LittleFS
 static bool pic_exists(uint8_t slot) {
@@ -120,7 +124,7 @@ static lv_img_dsc_t art_dsc; // LVGL decodes the JPEG from RAM with its SJPG/JPE
 class FsStorage : public lc::Storage {
   File f;
   uint8_t kind = 0;
-  const char *tmp_path() const { return kind == lc::KIND_PICTURE ? PIC_TMP : TMP_PATH; }
+  const char *tmp_path() const { return kind == lc::KIND_PICTURE ? PIC_TMP : kind == lc::KIND_SOUND ? SND_TMP : TMP_PATH; }
 
  public:
   size_t free_bytes() override { return LittleFS.totalBytes() - LittleFS.usedBytes(); }
@@ -134,6 +138,7 @@ class FsStorage : public lc::Storage {
       return art_tmp != NULL;
     }
     if (k == lc::KIND_PICTURE && !path_exists("/img")) LittleFS.mkdir("/img");
+    if (k == lc::KIND_SOUND && !path_exists("/snd")) LittleFS.mkdir("/snd");
     f = LittleFS.open(tmp_path(), "w");
     return (bool)f;
   }
@@ -207,15 +212,22 @@ class FsStorage : public lc::Storage {
     }
     char fin[24];
     if (k == lc::KIND_PICTURE) pic_path(slot, fin, sizeof fin);
-    else strlcpy(fin, FINAL_PATH, sizeof fin);
+    else if (k == lc::KIND_SOUND) {
+      snd_path(slot, fin, sizeof fin);
+      audioStopAndWait(800); // the old copy may be playing right now
+    } else strlcpy(fin, FINAL_PATH, sizeof fin);
     if (k == lc::KIND_PICTURE) { // LVGL may hold the old file open for its image cache
       char lvp[24];
       pic_lv_path(slot, lvp, sizeof lvp);
       lv_img_cache_invalidate_src(lvp);
     }
-    if (LittleFS.rename(tmp_path(), fin)) return true;
-    LittleFS.remove(fin); // some littlefs builds refuse to rename over an existing file
-    return LittleFS.rename(tmp_path(), fin);
+    bool done = LittleFS.rename(tmp_path(), fin);
+    if (!done) {
+      LittleFS.remove(fin); // some littlefs builds refuse to rename over an existing file
+      done = LittleFS.rename(tmp_path(), fin);
+    }
+    if (k == lc::KIND_SOUND) sounds_refresh(slot);
+    return done;
   }
   void tmp_discard() override {
     if (kind == lc::KIND_ART) {
@@ -282,6 +294,39 @@ class FsStorage : public lc::Storage {
     log_i("picture check kind %u slot %u: %s", (unsigned)k, (unsigned)slot, ok ? "decodes" : "CANNOT decode");
     return ok;
   }
+  uint32_t sound_size(uint8_t slot) override {
+    char p[40];
+    snprintf(p, sizeof p, "/littlefs/snd/%u.wav", (unsigned)slot);
+    struct stat s;
+    return stat(p, &s) == 0 ? (uint32_t)s.st_size : 0;
+  }
+  uint32_t sound_crc(uint8_t slot) override {
+    if (sound_size(slot) == 0) return 0;
+    Preferences lp;
+    lp.begin("layout", true);
+    char key[8];
+    snprintf(key, sizeof key, "snd%u", (unsigned)slot);
+    uint32_t c = lp.getUInt(key, 0);
+    lp.end();
+    return c;
+  }
+  void set_sound_crc(uint8_t slot, uint32_t c) override {
+    Preferences lp;
+    lp.begin("layout", false);
+    char key[8];
+    snprintf(key, sizeof key, "snd%u", (unsigned)slot);
+    lp.putUInt(key, c);
+    lp.end();
+  }
+  bool sound_remove(uint8_t slot) override { // only the custom copy: /snd/<slot>.wav. The original files are in the root and are never touched.
+    char p[24];
+    snd_path(slot, p, sizeof p);
+    audioStopAndWait(800);
+    bool ok = !path_exists(p) || LittleFS.remove(p);
+    sounds_refresh(slot);
+    return ok;
+  }
+  bool sound_play(uint8_t slot) override { return sound_play_event(slot); }
   bool picture_remove(uint8_t slot) override {
     char p[24], lvp[24];
     pic_path(slot, p, sizeof p);
@@ -937,7 +982,7 @@ static void timers_cb(lv_timer_t *) {
   uint32_t now = millis();
   if (POMO.running && (int32_t)(now - POMO.end_ms) >= 0) {
     const Widget *pw = first_of(lc::W_POMO);
-    beepbeep();
+    if (!sound_play(lc::SND_POMO_END)) beepbeep();
     if (!POMO.on_break && pw) { // work done: the break starts by itself
       POMO.on_break = true;
       POMO.total_ms = (uint32_t)pw->b * 60000UL;
@@ -958,7 +1003,7 @@ static void timers_cb(lv_timer_t *) {
     ui_toast(REMIND_TEXT[w.k < 3 ? w.k : 0], 6000);
     set_mood(MOOD_HAPPY);
     pets_event(PET_ATTENTION, 6000);
-    beepbeep();
+    if (!sound_play(lc::SND_REMINDER)) beepbeep();
   }
 }
 
@@ -975,13 +1020,18 @@ static void widget_cb(lv_event_t *ev) {
   const Widget &w = L.widgets[pg.first + i];
   bool tap = (code == LV_EVENT_SHORT_CLICKED), hold = (code == LV_EVENT_LONG_PRESSED);
   switch (w.type) {
-    case lc::W_BUTTON: if (tap) queue_action(w.e, w.g); break;
+    case lc::W_BUTTON:
+      if (tap) {
+        if (w.u >= 1 && w.u <= 4 && sound_play(lc::SND_BUTTON1 + w.u - 1)) click_mute_until = millis() + 400; // custom press sound replaces the click
+        queue_action(w.e, w.g);
+      }
+      break;
     case lc::W_SPOTIFY: if (tap) queue_action((uint8_t)(uintptr_t)lv_obj_get_user_data(lv_event_get_target(ev)), 0); break;
     case lc::W_POMO: if (tap) queue_action(lc::BA_POMO_TOGGLE, 0); else if (hold) queue_action(lc::BA_POMO_RESET, 0); break;
     case lc::W_STOPWATCH: if (tap) queue_action(lc::BA_SW_TOGGLE, 0); else if (hold) queue_action(lc::BA_SW_RESET, 0); break;
     case lc::W_FOCUS: if (tap) queue_action(lc::BA_FOCUS_TOGGLE, 0); break;
     case lc::W_TCAT: case lc::W_MOOD: if (tap) pet_request(); break;
-    case lc::W_PET: if (tap) { pets_petted(); clickSound(); } break;
+    case lc::W_PET: if (tap) { pets_petted(); if (!sound_play(lc::SND_PET_TAP)) clickSound(); } break;
     case lc::W_REMIND: if (tap) { uint8_t idx = pg.first + i; remind_next[idx] = millis() + (uint32_t)w.p * 60000UL; remind_shown[idx] = 0; clickSound(); } break;
     default: break;
   }
@@ -1358,6 +1408,8 @@ void layout_begin(bool boot_held) {
   }
   if (path_exists(TMP_PATH)) LittleFS.remove(TMP_PATH); // leftover of an upload that was cut by a reset or power loss
   if (path_exists(PIC_TMP)) LittleFS.remove(PIC_TMP);
+  if (path_exists(SND_TMP)) LittleFS.remove(SND_TMP);
+  sounds_init(); // which custom sounds exist
   bool stored = file_exists();
   if (stored && stored_crc_cache == 0) stored_crc_cache = 0xFFFFFFFFu; // a layout file with unknown crc (should not happen)
   const char *note = NULL;
@@ -1400,7 +1452,7 @@ void layout_begin(bool boot_held) {
 // ------------------------------------------------------------------------------------------------
 // Upload protocol
 // ------------------------------------------------------------------------------------------------
-bool layout_packet_id(uint8_t id) { return (id >= lc::PKT_BEGIN && id <= lc::PKT_QUERY) || id == lc::PKT_RESET; }
+bool layout_packet_id(uint8_t id) { return (id >= lc::PKT_BEGIN && id <= lc::PKT_QUERY) || id == lc::PKT_RESET || id == lc::PKT_PLAY; }
 
 void layout_packet(const uint8_t *pkt, uint8_t len) {
   if (len < 3) return;

@@ -5,7 +5,7 @@
 
 void layout_begin(bool boot_held); // setup(), after ui_ext_init(). boot_held = BOOT button was down at power-up
 void layout_poll(); // loop(): applies a freshly uploaded layout
-bool layout_packet_id(uint8_t id); // 0x0B..0x0F and 0x11 belong to the layout upload protocol
+bool layout_packet_id(uint8_t id); // 0x0B..0x0F, 0x11 and 0x14 (play a sound slot) belong to the layout upload protocol
 void layout_packet(const uint8_t *pkt, uint8_t len); // full frame [0xFF][id][len][payload]; answers with a 0x10 ack on Serial
 bool layout_active();
 const char *layout_status(); // short text for the settings screen
