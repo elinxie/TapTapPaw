@@ -49,6 +49,10 @@ git -C /tmp/ttp-pages commit -am "Update web-sync page" && git -C /tmp/ttp-pages
 git worktree remove /tmp/ttp-pages
 ```
 
+### Layout upload (packets `0x0B`-`0x11`)
+
+The page code also contains the layout validator and upload driver for the widget builder (see `WIDGETS.md`). They send no packets until a layout is uploaded, and the existing packets are unchanged.
+
 ### What a browser page cannot do
 
 | Missing | Why |

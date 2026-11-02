@@ -1,5 +1,6 @@
 #include "ui_ext.h"
 #include "keymap.h"
+#include "layout.h"
 #include "power.h"
 #include "ui/ui.h"
 #include "wifi_sync.h"
@@ -9,6 +10,7 @@ static lv_obj_t *scr_ext = NULL;
 #if ENABLE_WIFI
 static lv_obj_t *lbl_wifi = NULL;
 #endif
+static lv_obj_t *lbl_layout = NULL;
 static lv_obj_t *dd_idle_after = NULL;
 static lv_obj_t *dd_keys[SLOT_COUNT] = {NULL};
 static const uint8_t IDLE_MINUTE_CHOICES[] = {1, 2, 5, 10, 30};
@@ -113,6 +115,17 @@ static void wifi_status_timer(lv_timer_t *t) {
 }
 #endif
 
+static void layout_reset_cb(lv_event_t *e) {
+  layout_reset();
+  if (lbl_layout != NULL) lv_label_set_text(lbl_layout, layout_status());
+}
+
+static void layout_status_timer(lv_timer_t *t) {
+  if (lbl_layout == NULL) return;
+  const char *s = layout_status();
+  if (strcmp(lv_label_get_text(lbl_layout), s) != 0) lv_label_set_text(lbl_layout, s);
+}
+
 static void build_ext_screen() {
   scr_ext = lv_obj_create(NULL);
   lv_obj_set_style_bg_color(scr_ext, lv_color_hex(0x1B1620), LV_PART_MAIN);
@@ -150,6 +163,13 @@ static void build_ext_screen() {
   add_button(scr_ext, "Forget WiFi", 110, wifi_forget_cb);
   lv_timer_create(wifi_status_timer, 1000, NULL);
 #endif
+
+  add_heading(scr_ext, "Widget layout (built on the web page)");
+  lbl_layout = lv_label_create(scr_ext);
+  lv_label_set_text(lbl_layout, layout_status());
+  lv_obj_set_style_text_color(lbl_layout, lv_color_white(), LV_PART_MAIN);
+  add_button(scr_ext, "Reset layout", 110, layout_reset_cb);
+  lv_timer_create(layout_status_timer, 1000, NULL);
 
   add_heading(scr_ext, "Keys (events always go to the app)");
   static const char *slot_names[SLOT_COUNT] = {"Key1 tap", "Key1 hold", "Key2 tap", "Key2 hold", "Key1+Key2", "Key1+Key2 hold"};
