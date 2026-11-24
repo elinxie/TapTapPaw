@@ -1,0 +1,97 @@
+# Builds the board firmware with PlatformIO and publishes it to gh-pages for the Web Sync page's
+# "Flash firmware" section (ESP Web Tools). Every pushed branch gets its own channel folder:
+#   https://elinxie.github.io/TapTapPaw/firmware/<branch-slug>/manifest-<env>.json
+# Pull requests only build (no publish). Only firmware/ on gh-pages is written; index.html is not touched.
+name: firmware
+
+on:
+  push:
+    branches-ignore: [gh-pages]
+    paths: [sketch/**, scripts/make_flash_manifest.py, .github/workflows/firmware.yml]
+  pull_request:
+    paths: [sketch/**, scripts/make_flash_manifest.py, .github/workflows/firmware.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Appended to build_flags of every env in sketch/platformio.ini.
+  PLATFORMIO_BUILD_FLAGS: -DINVERT_COLORS_DEFAULT=1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [esp32dev, esp32dev_wifi, esp32dev_ble]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+            sketch/.pio/libdeps
+          key: pio-${{ matrix.env }}-${{ hashFiles('sketch/platformio.ini') }}
+      - run: pip install platformio==6.1.18
+      - name: Build ${{ matrix.env }}
+        run: pio run -d sketch -e ${{ matrix.env }}
+      - name: Size
+        run: |
+          ls -l sketch/.pio/build/${{ matrix.env }}/*.bin
+          echo "### ${{ matrix.env }}: firmware.bin $(stat -c %s sketch/.pio/build/${{ matrix.env }}/firmware.bin) bytes" >> "$GITHUB_STEP_SUMMARY"
+      - name: Collect bins
+        run: |
+          mkdir -p out
+          cp sketch/.pio/build/${{ matrix.env }}/{bootloader,partitions,firmware}.bin out/
+          cp ~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fw-${{ matrix.env }}
+          path: out/
+          retention-days: 14
+
+  publish:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: gh-pages-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: pages
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: Write bins + manifests
+        run: |
+          python3 -I src/scripts/make_flash_manifest.py \
+            --pages pages --branch "${GITHUB_REF_NAME}" --sha "${GITHUB_SHA}" \
+            --flags="${PLATFORMIO_BUILD_FLAGS}" \
+            --boot-app0 art/fw-esp32dev/boot_app0.bin \
+            --env esp32dev=art/fw-esp32dev \
+            --env esp32dev_wifi=art/fw-esp32dev_wifi \
+            --env esp32dev_ble=art/fw-esp32dev_ble
+      - name: Push to gh-pages
+        working-directory: pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add firmware
+          if git diff --cached --quiet; then echo "nothing to publish"; exit 0; fi
+          git commit -m "firmware: ${GITHUB_REF_NAME} @ ${GITHUB_SHA::7}"
+          for i in 1 2 3; do git pull --rebase origin gh-pages && git push origin HEAD:gh-pages && exit 0; sleep 5; done
+          exit 1
