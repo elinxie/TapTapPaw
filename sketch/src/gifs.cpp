@@ -12,6 +12,7 @@ struct Gif {
   int cw, ch;
   uint32_t next_ms;
   bool used;
+  bool restart; // the loop just ended: wipe the canvas only when the first frame of the next loop is about to be drawn
   bool closed; // the file was released (it is about to be replaced or deleted): the canvas keeps its last frame
   uint8_t slot;
 };
@@ -97,6 +98,7 @@ lv_obj_t *gif_create(lv_obj_t *parent, int x, int y, int w, int h, uint8_t slot)
   if (!buf) { log_w("gif: no memory for the %dx%d canvas", cw, ch); g->close(); delete g; return NULL; }
   G->used = true;
   G->closed = false;
+  G->restart = false;
   G->slot = slot;
   G->g = g;
   G->buf = buf;
@@ -127,11 +129,15 @@ void gifs_tick() {
   for (auto &G : slots) {
     if (!G.used || G.closed || (int32_t)(now - G.next_ms) < 0) continue;
     int delay = 0;
+    if (G.restart) { // clear and draw frame 1 in the same tick, so the screen never shows a bare canvas
+      memset(G.buf, 0, (size_t)G.cw * G.ch * 2);
+      G.restart = false;
+    }
     int r = G.g->playFrame(false, &delay, &G);
     lv_obj_invalidate(G.cv);
-    if (r <= 0) { // last frame shown (0) or a decode error (< 0): start over, from a clean canvas
+    if (r <= 0) { // last frame shown (0) or a decode error (< 0): leave it on screen for its delay, then start over
       G.g->reset();
-      memset(G.buf, 0, (size_t)G.cw * G.ch * 2);
+      G.restart = true;
     }
     if (delay < 20) delay = 20; // cap at 50 frames a second; most GIFs ask 50-100 ms
     G.next_ms = now + (uint32_t)delay;
