@@ -103,6 +103,59 @@
     <div class="mute">The board usually reboots once when the port opens; sending starts after a short wait.</div>
   </section>
 
+  <section id="flash">
+    <h2>Flash firmware (builds from this fork)</h2>
+    <div class="mute">Built by GitHub Actions from <code>elinxie/TapTapPaw</code> with <code>-DINVERT_COLORS_DEFAULT=1</code>. Writes bootloader, partition table and app only: settings (NVS), sounds and GIFs (LittleFS) stay. Chrome or Edge on desktop.</div>
+    <div class="row">
+      <label>Build <select id="fwChannel"><option>loading...</option></select></label>
+      <label>Type <select id="fwEnv"></select></label>
+    </div>
+    <div class="row">
+      <esp-web-install-button id="fwInstall"><button slot="activate" id="fwBtn" disabled>Flash to board</button><span slot="unsupported" class="bad">This browser has no Web Serial. Use Chrome or Edge on desktop.</span><span slot="not-allowed" class="bad">Flashing needs https.</span></esp-web-install-button>
+      <span class="mute" id="fwInfo"></span>
+    </div>
+    <div class="mute">The page lets go of the board first (Disconnect), since only one tab can hold the serial port. Use the same Type as your board has now; the Standard type and the WiFi/Bluetooth types use different app partition sizes, but NVS and LittleFS keep their offsets either way.</div>
+  </section>
+<script type="module" src="https://unpkg.com/esp-web-tools@10.1.0/dist/web/install-button.js?module"></script>
+<script>
+// Flash section: channels.json is written by .github/workflows/firmware.yml on gh-pages.
+(function () {
+  if (window.__ttpReturn) return;
+  const $ = (id) => document.getElementById(id);
+  let chans = [];
+  const fmtKB = (n) => (n / 1024).toFixed(0) + ' KB';
+  function fillEnvs() {
+    const c = chans[$('fwChannel').selectedIndex]; const env = $('fwEnv'); const keep = env.value;
+    env.innerHTML = '';
+    (c ? c.envs : []).forEach((e) => { const o = document.createElement('option'); o.value = e.env; o.textContent = e.label; env.appendChild(o); });
+    if (keep && [...env.options].some((o) => o.value === keep)) env.value = keep;
+    pick();
+  }
+  function pick() {
+    const c = chans[$('fwChannel').selectedIndex]; const e = c && c.envs.find((x) => x.env === $('fwEnv').value);
+    $('fwBtn').disabled = !e;
+    if (!e) { $('fwInfo').textContent = ''; return; }
+    $('fwInstall').setAttribute('manifest', e.manifest);
+    $('fwInfo').textContent = `${c.branch} @ ${c.sha.slice(0, 7)}, built ${c.built}, app ${fmtKB(e.app_bytes)}`;
+  }
+  $('fwChannel').addEventListener('change', fillEnvs);
+  $('fwEnv').addEventListener('change', pick);
+  // Free the serial port before ESP Web Tools asks for it.
+  $('fwInstall').addEventListener('click', () => {
+    const b = $('btnDisconnect');
+    if (b && !b.disabled) { b.click(); if (typeof log === 'function') log('flash: disconnected so the installer can use the port'); }
+  }, true);
+  fetch('firmware/channels.json', { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }).then((j) => {
+    chans = j.channels || [];
+    const sel = $('fwChannel'); sel.innerHTML = '';
+    chans.forEach((c) => { const o = document.createElement('option'); o.textContent = `${c.branch} (${c.sha.slice(0, 7)})`; sel.appendChild(o); });
+    const def = chans.findIndex((c) => c.branch === 'feature/timer-widgets'); if (def >= 0) sel.selectedIndex = def;
+    if (!chans.length) $('fwInfo').textContent = 'no builds published yet';
+    fillEnvs();
+  }).catch((e) => { $('fwChannel').innerHTML = '<option>none</option>'; $('fwInfo').textContent = 'no firmware list here (' + e.message + '). It exists on elinxie.github.io/TapTapPaw.'; });
+})();
+</script>
+
   <section id="builder">
     <h2>Widget builder (layout for the board)</h2>
     <div class="mute" style="margin:-4px 0 10px">Place widgets on the 240x320 screen, add pages you swipe between, then press <b>Send to board</b>. Nothing is compiled: the board reads the layout. Needs firmware with the layout engine (PR #7 or later).</div>
