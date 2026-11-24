@@ -402,6 +402,7 @@ static lc::Err load_file(lc::Layout &out) {
 // Building a page
 // ------------------------------------------------------------------------------------------------
 static void gesture_cb(lv_event_t *e);
+static void spotify_cb(lv_event_t *ev);
 static void widget_cb(lv_event_t *ev);
 
 static const lv_font_t *font_for(uint8_t z) { return z ? &lv_font_montserrat_20 : &lv_font_montserrat_14; }
@@ -872,7 +873,11 @@ static lv_obj_t *prepare_page(uint8_t idx) {
         lv_obj_add_event_cb(root, widget_cb, LV_EVENT_LONG_PRESSED, ud);
         break;
       case lc::W_SPOTIFY:
-        for (uint32_t k = 0; k < lv_obj_get_child_cnt(root); k++) lv_obj_add_event_cb(lv_obj_get_child(root, k), widget_cb, LV_EVENT_SHORT_CLICKED, ud);
+        for (uint32_t k = 0; k < lv_obj_get_child_cnt(root) && k < 3; k++) {
+          lv_obj_t *bt = lv_obj_get_child(root, k);
+          lv_obj_add_flag(bt, LV_OBJ_FLAG_CLICKABLE);
+          lv_obj_add_event_cb(bt, spotify_cb, LV_EVENT_SHORT_CLICKED, (void *)(uintptr_t)(k == 0 ? lc::BA_SP_PREV : k == 1 ? lc::BA_SP_PLAY : lc::BA_SP_NEXT));
+        }
         break;
       default: break;
     }
@@ -1129,6 +1134,14 @@ static void timers_cb(lv_timer_t *) {
 // ---- taps on widgets ----
 static void queue_action(uint8_t e, uint16_t g) {
   if (pend_n < sizeof pend / sizeof pend[0]) pend[pend_n++] = {e, g};
+}
+// Spotify controls: each of the three buttons carries its own action (previous, play/pause, next) in the event's user data,
+// so a tap never depends on the button's object user data being readable. The log line shows on the serial monitor.
+static void spotify_cb(lv_event_t *ev) {
+  if (!active || L.pages[cur].is_main) return;
+  uint8_t act = (uint8_t)(uintptr_t)lv_event_get_user_data(ev);
+  log_i("spotify button: action %u", (unsigned)act);
+  queue_action(act, 0);
 }
 static void widget_cb(lv_event_t *ev) {
   if (!active || L.pages[cur].is_main) return;
