@@ -1,6 +1,33 @@
 {
   "channels": [
     {
+      "channel": "ci-firmware-pages",
+      "branch": "ci/firmware-pages",
+      "sha": "ef8096d4ed70cec2a6aa231357096bfbd9e90f34",
+      "built": "2026-11-24 23:52 UTC",
+      "flags": "-DINVERT_COLORS_DEFAULT=1",
+      "envs": [
+        {
+          "env": "esp32dev",
+          "label": "Standard (USB serial)",
+          "manifest": "firmware/ci-firmware-pages/manifest-esp32dev.json",
+          "app_bytes": 1353264
+        },
+        {
+          "env": "esp32dev_wifi",
+          "label": "WiFi mode (NTP + weather, no computer)",
+          "manifest": "firmware/ci-firmware-pages/manifest-esp32dev_wifi.json",
+          "app_bytes": 2075808
+        },
+        {
+          "env": "esp32dev_ble",
+          "label": "Bluetooth keyboard buttons",
+          "manifest": "firmware/ci-firmware-pages/manifest-esp32dev_ble.json",
+          "app_bytes": 1735248
+        }
+      ]
+    },
+    {
       "channel": "fix-spotify-board-buttons",
       "branch": "fix/spotify-board-buttons",
       "sha": "bccf7c61c5aed0171f1d8a526ec63acd867503f3",
