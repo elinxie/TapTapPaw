@@ -1,0 +1,28 @@
+{
+  "name": "TapTapPaw WiFi mode (NTP + weather, no computer)",
+  "version": "bccf7c6 (2026-11-24 23:51 UTC)",
+  "new_install_prompt_erase": false,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "esp32dev_wifi/bootloader.bin",
+          "offset": 4096
+        },
+        {
+          "path": "esp32dev_wifi/partitions.bin",
+          "offset": 32768
+        },
+        {
+          "path": "esp32dev_wifi/boot_app0.bin",
+          "offset": 57344
+        },
+        {
+          "path": "esp32dev_wifi/firmware.bin",
+          "offset": 65536
+        }
+      ]
+    }
+  ]
+}

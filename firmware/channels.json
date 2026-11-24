@@ -1,0 +1,31 @@
+{
+  "channels": [
+    {
+      "channel": "fix-spotify-board-buttons",
+      "branch": "fix/spotify-board-buttons",
+      "sha": "bccf7c61c5aed0171f1d8a526ec63acd867503f3",
+      "built": "2026-11-24 23:51 UTC",
+      "flags": "-DINVERT_COLORS_DEFAULT=1",
+      "envs": [
+        {
+          "env": "esp32dev",
+          "label": "Standard (USB serial)",
+          "manifest": "firmware/fix-spotify-board-buttons/manifest-esp32dev.json",
+          "app_bytes": 1353504
+        },
+        {
+          "env": "esp32dev_wifi",
+          "label": "WiFi mode (NTP + weather, no computer)",
+          "manifest": "firmware/fix-spotify-board-buttons/manifest-esp32dev_wifi.json",
+          "app_bytes": 2076064
+        },
+        {
+          "env": "esp32dev_ble",
+          "label": "Bluetooth keyboard buttons",
+          "manifest": "firmware/fix-spotify-board-buttons/manifest-esp32dev_ble.json",
+          "app_bytes": 1735504
+        }
+      ]
+    }
+  ]
+}
