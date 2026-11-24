@@ -80,7 +80,7 @@ jobs:
         run: |
           python3 -I src/scripts/make_flash_manifest.py \
             --pages pages --branch "${GITHUB_REF_NAME}" --sha "${GITHUB_SHA}" \
-            --flags "${PLATFORMIO_BUILD_FLAGS}" \
+            --flags="${PLATFORMIO_BUILD_FLAGS}" \
             --boot-app0 art/fw-esp32dev/boot_app0.bin \
             --env esp32dev=art/fw-esp32dev \
             --env esp32dev_wifi=art/fw-esp32dev_wifi \
