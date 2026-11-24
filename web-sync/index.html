@@ -1275,9 +1275,15 @@ async function onBoardEvent(action, arg) {
   if (action === 18) { log('board button: event ' + arg); return; }
   if (action < 15 || action > 17) { log('board event: ' + name); return; }
   if (!sp) { log('board button "' + name + '": sign in to Spotify on this page first'); return; }
-  const [method, path] = action === 15 ? ['PUT', spPlaying ? 'pause' : 'play'] : ['POST', action === 16 ? 'next' : 'previous'];
+  const method = action === 15 ? 'PUT' : 'POST';
+  let path = action === 15 ? (spPlaying ? 'pause' : 'play') : action === 16 ? 'next' : 'previous';
   try {
     if (Date.now() > sp.exp && !(await spRefresh())) return;
+    if (action === 15) { // ask Spotify what it is doing right now: the polled state can be seconds old, and the wrong word is refused
+      const q = await fetch('https://api.spotify.com/v1/me/player', { headers: { Authorization: 'Bearer ' + sp.access } });
+      if (q.status === 200) { const pj = await q.json(); spPlaying = !!(pj && pj.is_playing); }
+      path = spPlaying ? 'pause' : 'play';
+    }
     const r = await fetch('https://api.spotify.com/v1/me/player/' + path, { method, headers: { Authorization: 'Bearer ' + sp.access } });
     if (r.status === 204 || r.status === 200 || r.status === 202) { log('Spotify: ' + path); if (action === 15) spPlaying = !spPlaying; setTimeout(spPoll, 600); }
     else if (r.status === 403 || r.status === 401) log('Spotify refused "' + path + '" (HTTP ' + r.status + '): it needs Premium, and a new sign-in to allow playback control (Sign out, then Sign in)');
